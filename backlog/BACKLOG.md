@@ -1,0 +1,427 @@
+# BQ-Integraciones — Backlog de implementación
+
+Servicio independiente que reemplaza el tramo **Woo → SAP → folio → Facele/Docele → Brevo** del
+pipeline de pedidos de bioquimica.cl.
+
+- **Referencia de lógica de negocio:** `Integrify-Consola` (Django, hoy en producción — es lo que
+  la web realmente está recibiendo). Ruta: `C:\Users\920562\Desktop\Integrify-consola`.
+- **Referencia de arquitectura y código a portar:** `Stock-Service` (FastAPI + SQLModel + Celery +
+  Beat + Redis + Alembic + pytest), proyecto hermano ya en producción en Railway. Ruta:
+  `C:\Users\920562\Documents\proyectos\Stock-Service`.
+- **Sesión SAP:** `Token-SAP-BQ` (servicio centralizado de sesión SAP, Railway). Ruta:
+  `C:\Users\920562\Documents\proyectos\Token-SAP-BQ`.
+- **Catálogo de productos:** `Stock-Service` en producción — `GET /api/v1/stock/products/{sku}` y
+  `GET /api/v1/stock/catalog` (`stock-sap-bq-production.up.railway.app`). No se sincroniza un
+  catálogo propio.
+- **Estado:** v1 del backlog. Listo para empezar por E0.
+
+Ver `plan.md` en esta misma carpeta para el detalle narrativo de arquitectura, contexto y
+decisiones. Este documento es el de **seguimiento de avance** — se actualiza a medida que se
+implementa cada ticket.
+
+---
+
+## 1. Objetivo
+
+Replicar, en un proyecto nuevo y liviano, el tramo de Integrify-Consola que factura pedidos web en
+SAP, espera el folio del DTE, obtiene el PDF de Facele/Docele y lo envía por Brevo — con manejo de
+errores explícito por ítem (un pedido que falla nunca detiene a los demás) y backpressure (la
+profundidad de la cola amortigua, no se dispara más carga de la que SAP/Facele/Brevo toleran).
+
+## 2. Alcance
+
+**v1:**
+- Resolución/creación de Business Partner en SAP (RUT, comuna, direcciones) — dependencia dura de
+  facturar, replicada completa (no asumida).
+- Ingesta de pedidos WooCommerce por polling, transformación a facturación SAP (troceo de 21 ítems +
+  envío), resolución de SKU/bodega **vía Stock-Service** (no catálogo propio).
+- Creación de la facturación en SAP Service Layer.
+- Espera del folio por polling (`FolioNumber ne null`).
+- Obtención del PDF desde Facele/Docele (SOAP), decodificación doble base64.
+- Envío del PDF por Brevo, con alertas internas ante fallo definitivo.
+- API de consulta/estado, reintentos acotados y visibles, tests con cobertura de invariantes.
+
+**Fuera de v1:** sincronización propia de catálogo de productos (vive en Stock-Service) ·
+sincronización de stock/precio hacia WooCommerce (no es este pipeline) · UI de administración
+(alcanza con `/status`, `/failures`, admin de BD directo) · cualquier lógica de despacho/courier
+(vive en `gestorBQ`, dominio distinto).
+
+## 3. Arquitectura
+
+| Componente | Tecnología | Nota |
+|---|---|---|
+| API | FastAPI + Uvicorn | disparo manual y consulta |
+| ORM | SQLModel (SQLAlchemy 2 async) + asyncpg | |
+| DB | PostgreSQL | nativo en servidor on-prem (compartido con gestorBQ, base propia) |
+| Migraciones | Alembic | |
+| Cola / scheduler | Celery worker + Beat | igual patrón que Stock-Service |
+| Broker / lock / caché | Redis | lock distribuido, caché de sesión SAP y de catálogo Stock-Service |
+| **Sesión SAP** | **Token-SAP-BQ** | `POST /session` / `POST /session/invalidate`; sin login propio |
+| **Catálogo de productos** | **Stock-Service** | `GET /stock/products/{sku}`; sin sync propio |
+| Cliente Woo | `requests` + Basic Auth, paginación `X-WP-TotalPages` | |
+| Facele/Docele | SOAP (`xmltodict`) | `DoceleOL_Auth/DocumentosEmitidosService` |
+| Brevo | REST + API key | adjunto PDF |
+| Observabilidad | Sentry + `api_logs` + alertas por correo | |
+| Despliegue | docker-compose en servidor on-prem (api/worker/beat; Postgres/Redis ya viven ahí, fuera del compose) | |
+
+```
+BQ-Integraciones/
+├── app/
+│   ├── api/routes/{orders,billing,invoices,failures}.py
+│   ├── core/{config,database,logging,sentry,api_log}.py
+│   ├── models/{woo_order,sap_customer,sap_billing,sap_invoice,email,failure,sync_run,reference_data}.py
+│   ├── pipelines/{customers,billing,invoices,documents,notifications}.py
+│   ├── services/sap/{session,client}.py
+│   ├── services/woocommerce/client.py
+│   ├── services/facele/client.py
+│   ├── services/brevo/client.py
+│   ├── services/stockservice/client.py
+│   └── tasks/{celery_app,scheduled,locks,heartbeat}.py
+├── alembic/ · tests/ · docs/RUNBOOK.md · backlog/{plan,BACKLOG}.md
+└── docker-compose.yml · Dockerfile · .dockerignore · pyproject.toml
+```
+
+## 4. Flujo del pipeline (7 fases)
+
+```
+FASE 1  resolve_customer   Woo → SAP        RUT válido, comuna mapeada, BP creado/actualizado
+FASE 2  prepare_billing     DB → DB          trocea ítems (21) + envío, resuelve SKU/bodega vía Stock-Service
+FASE 3  create_sap_invoice  DB → SAP         POST /Invoices — crea el documento (aún sin folio)
+FASE 4  poll_sap_invoices   SAP → DB         filtro FolioNumber ne null — la espera del folio ES este polling
+FASE 5  fetch_pdf           Docele → DB      SOAP, decodifica base64 doble
+FASE 6  prepare_email       DB → DB          valida destinatarios, construye payload
+FASE 7  send_email          DB → Brevo       adjunta PDF, envía
+```
+
+Cada fase = una tarea Celery + un `SyncRun`. La fase 4 corre en su propio ciclo de Beat, desacoplada
+de las fases 1-3 (igual que en el original, dos cron separados).
+
+## 5. Modelo de datos
+
+Estado común a toda tabla de trabajo: `status` (`PENDING|IN_PROGRESS|COMPLETED|FAILED|SKIPPED|EXHAUSTED`),
+`status_message`, `attempts`, `last_attempt_at`, `created_at`/`updated_at`.
+
+- **`woo_orders`** — `code` (único) · `reference` · `paid_at` · `total` · `shipping` ·
+  `delivery_method_code` · `bill_doc_type_code` · `customer_tax_id` · `billing_address`/`shipping_address` (JSON) ·
+  `items` (JSON, snapshot inmutable)
+- **`sap_customers`** — `tax_id` (único) · `code` · `contact_code`/`contact_name` ·
+  `bill_code`/`bill_row` · `ship_code`/`ship_row` · `business_activity` · `exists` (bool)
+- **`sap_billings`** — `woo_order_id` FK · `chunk_index` (unique con woo_order_id) · `doc_type_code` ·
+  `total` · `doc_date` · `items` (JSON resuelto) · `doc_entry` · `doc_num`
+- **`sap_invoices`** — `sap_billing_id` FK · `doc_entry` (único) · `folio` · `folio_prefix` ·
+  `customer_email`/`contact_email`/`seller_email` · `pdf_base64`
+- **`emails`** — `sap_invoice_id`/`woo_order_id` FK · `event_type` (`CUSTOMER_INVOICE|INTERNAL_ALERT`) ·
+  `to`/`bcc` (JSON) · `brevo_message_id`
+- **`failures`** — `entity_type` · `entity_id` · `stage` · `error_message` · `attempts` ·
+  `occurred_at` · `notified`
+- **`sync_runs`** — `pipeline` · `triggered_by` · `status` · tiempos · contadores
+- **`municipalities`/`industries`/`delivery_methods`/`bill_document_types`** — catálogos estáticos,
+  `woo_code` único → `sap_code`/`sap_sku`, poblados por `scripts/seed_from_legacy.py`
+
+## 6. Reglas de negocio
+
+| # | Regla | Detalle |
+|---|---|---|
+| R1 | `DocDueDate` | = `DocDate`, no `commit_date` — si no, el DTE imprime "Crédito" en vez de "Contado" |
+| R2 | Troceo de ítems | lotes de 21 líneas por `SAPBilling` (límite SAP Service Layer) |
+| R3 | Espera de folio | polling `$filter=FolioNumber ne null`, nunca por evento |
+| R4 | PDF Facele/Docele | base64 **doblemente** codificado, decodificar una sola vez |
+| R5 | Email cliente | `contact_email` > `customer_email`; BCC = vendedor + internos |
+| R6 | SKU/bodega de línea | resuelto contra Stock-Service (`sync_warehouse`), no tabla propia |
+| R7 | Cliente genérico boleta | `CardCode='CN55555555-5'` si no hay RUT válido — **no implementada a propósito** (2026-08-14): en Integrify no es una bifurcación real, es solo el `CardCode` resultante si Woo manda ese RUT puntual; verificado en Postgres real que 0/41 pedidos (Factura y Boleta) tienen `customer_tax_id` nulo. Se deja el `PermanentError` actual como red de seguridad hasta que aparezca un caso real en `/failures` |
+
+## 7. Invariantes de seguridad
+
+Cada una debe tener al menos un test dedicado (`test_invariants_coverage.py`, ver E7/BQI-71).
+
+- **I1** — Nunca se marca `COMPLETED` sin confirmación explícita (DocEntry de SAP, messageId de Brevo).
+- **I2** — Un pedido fallido no bloquea a los demás (aislamiento por tarea Celery).
+- **I3** — Circuit breaker de volumen: más de `MAX_ORDERS_PER_CYCLE` pedidos nuevos en un ciclo → alerta.
+- **I4** — Idempotencia por chunk: `unique(woo_order_id, chunk_index)` en `sap_billings`.
+- **I5** — Token-SAP-BQ caído nunca produce login directo a SAP (igual a I10 de Stock-Service).
+- **I6** — Reintentos acotados y visibles: al agotarse, siempre una fila en `failures`.
+- **I7** — El PDF nunca se adjunta si Facele no confirmó `estado==1`.
+- **I8** — Un email nunca se reenvía a una dirección inválida (se marca `SKIPPED`, no reintenta indefinidamente).
+
+## 8. Decisiones tomadas
+
+**D1 — Stack.** FastAPI + SQLModel + Celery + Beat + Redis + Alembic, calcado de `Stock-Service`
+(no Django, no RQ). Motivo: proyecto hermano ya prueba este stack en producción contra los mismos
+sistemas externos.
+
+**D2 — Catálogo de productos.** Se consume `Stock-Service` (`GET /stock/products/{sku}`) con caché
+Redis de 15 min. No se construye ni mantiene un espejo propio de productos.
+
+**D3 — Cliente SAP.** Se replica completo el módulo de clientes de Integrify-Consola (creación de
+Business Partner, no solo lookup) — un pedido de un cliente nuevo no debe quedar bloqueado
+esperando intervención manual.
+
+**D4 — Intake.** Polling programado a WooCommerce, no webhook — no se necesita reacción instantánea
+y evita exponer un endpoint público adicional.
+
+**D5 — Orquestación.** Celery+Redis acepta explícitamente el trade-off de aislar errores por ítem y
+dar backpressure vía profundidad de cola, sobre reintentos manuales `for/try/except/continue` del
+original.
+
+**D6 — gestorBQ descartado como dependencia.** Es un portal de logística/despachos sin relación de
+dominio con este pipeline (confirmado con el usuario) — solo aportó el estilo de los clientes de
+ejemplo (`integraciones/sap_client.py`/`woo_client.py`), que quedan como referencia histórica, no
+como base de código a extender.
+
+## 9. Épicas y tickets
+
+Puntos relativos (1 ≈ media jornada). Prefijo de ticket: **BQI-**.
+
+### E0 — Bootstrap (12 pts)
+
+| ID | Ticket | Pts | Criterio de aceptación |
+|---|---|---|---|
+| BQI-01 | Esqueleto `pyproject.toml`, ruff, pytest, `.env.example` | 2 | `uv sync` instala; `ruff check` limpio |
+| BQI-02 | `core/config.py` (Pydantic Settings): SAP, Token-SAP-BQ, Stock-Service, Woo, Facele, Brevo, DB, Redis, umbrales | 2 | Arranque falla con mensaje claro si falta una variable obligatoria |
+| BQI-03 | `core/database.py` async + `NullPool` en worker | 1 | Dos tareas Celery seguidas sin "Event loop is closed" |
+| BQI-04 | Alembic + migración inicial (todas las tablas de §5) | 2 | `alembic upgrade head` crea el esquema desde cero |
+| BQI-05 | `celery_app.py` + Beat + `locks.py` + `heartbeat.py` | 3 | Dos disparos simultáneos del mismo poll → el segundo responde `skipped: lock` |
+| BQI-06 | Dockerfile + docker-compose (api, worker, beat — Postgres/Redis viven fuera, en el servidor) | 2 | `docker compose up` levanta el stack y `/health` responde 200 |
+
+### E1 — Sesión y cliente SAP (8 pts)
+
+| ID | Ticket | Pts | Criterio de aceptación |
+|---|---|---|---|
+| BQI-10 | Portar `services/sap/session.py` de Stock-Service, `service_name=bq-integraciones` | 2 | Sesión compartida vía Token-SAP-BQ; cero llamadas a `/Login` |
+| BQI-11 | Portar `services/sap/client.py`, **extender con soporte POST/PATCH** (Stock-Service solo tiene GET) | 2 | `$`-safe URL, retry, timeouts, `api_logs`; POST/PATCH funcionando contra SAP TEST |
+| BQI-12 | Alta de `bq-integraciones` en `AUTHORIZED_SERVICES` de Token-SAP-BQ + verificación real | 1 | `POST /session` devuelve sesión válida |
+| BQI-13 | `get_all_pages` reusado tal cual | 1 | Catálogo/listado paginado completo sin duplicados |
+| BQI-14 | Tests de sesión/cliente (portar `test_sap_session.py`) | 2 | I5 cubierta, incluyendo el chequeo estático anti-login-directo |
+
+### E2 — Clientes SAP: resolución y creación de Business Partner (15 pts)
+
+| ID | Ticket | Pts | Criterio de aceptación |
+|---|---|---|---|
+| BQI-20 | Modelo `SAPCustomer` + tablas `municipalities`/`industries` | 2 | Migración aplica sin errores |
+| BQI-21 | `scripts/seed_from_legacy.py` — export desde MySQL de Integrify-Consola (municipios, industrias, delivery_methods, bill_document_types) | 2 | Conteo de filas coincide con el original |
+| BQI-22 | Validación de RUT chileno (`rut_chile`) | 1 | RUT inválido → `FAILED` inmediato, sin reintento |
+| BQI-23 | `find_by_rut` contra `BusinessPartners` de SAP | 2 | Cliente existente se encuentra por RUT |
+| BQI-24 | Sanitización de textos a límites de campo SAP (nombre, giro, email, teléfono, dirección) | 3 | Puerto de `app/customers/models/sap_customer.py::clean()` |
+| BQI-25 | `create_or_update` (POST si no existe, PATCH si existe, código `CN{tax_id}` por defecto) | 3 | Cliente nuevo queda creado en SAP TEST con contacto y direcciones |
+| BQI-26 | Pipeline `resolve_customer()` completo + tests | 2 | Cliente inexistente en SAP → se crea; cliente existente → se actualiza |
+
+### E3 — Intake WooCommerce y facturación (18 pts)
+
+| ID | Ticket | Pts | Criterio de aceptación |
+|---|---|---|---|
+| BQI-30 | `WooCommerceClient` de órdenes, paginación `X-WP-TotalPages` | 2 | 500+ pedidos recorridos sin duplicados ni saltos |
+| BQI-31 | `poll_woo_orders()` + dedup por `code` + circuit breaker I3 | 3 | Reejecutar sin pedidos nuevos → 0 encolados; >`MAX_ORDERS_PER_CYCLE` → alerta |
+| BQI-32 | `services/stockservice/client.py::get_product(sku)` + caché Redis | 2 | Segunda consulta al mismo SKU no golpea la API |
+| BQI-33 | `prepare_billing()`: troceo de 21 ítems + ítem de envío + resolución SKU/bodega | 4 | Pedido de 45 ítems → 3 `SAPBilling` (21/21/3) |
+| BQI-34 | Validación de totales (`WooOrder.total == Σ SAPBilling.total`) | 2 | Discrepancia → `FAILED` con mensaje explícito |
+| BQI-35 | `create_sap_invoice()`: `BillingPayload` (R1) + `POST /Invoices` | 3 | Documento creado en SAP TEST con `DocDueDate == DocDate` |
+| BQI-36 | Tests de billing con fixtures Woo/SAP | 2 | Cobertura de R1, R2, I4 |
+| BQI-37 | Idempotencia externa en `create_sap_invoice`: buscar factura existente en SAP antes de crear (`U_WedDocNum`+`DocTotal`+`U_IX_Ind`) | 2 | Reintentar sobre un chunk cuyo `POST /Invoices` ya fue aceptado por SAP (pero no se llegó a commitear localmente) adopta el `DocEntry` existente en vez de duplicar la factura |
+
+### E4 — Folio y Facele/Docele (12 pts)
+
+| ID | Ticket | Pts | Criterio de aceptación |
+|---|---|---|---|
+| BQI-40 | `poll_sap_invoices()`: filtro `FolioNumber ne null`, dedup por `doc_entry` | 3 | Factura sin folio no aparece; con folio, aparece una sola vez |
+| BQI-41 | `services/facele/client.py`: SOAP `DoceleOL_Auth/DocumentosEmitidosService` | 3 | Respuesta XML parseada a modelo Pydantic |
+| BQI-42 | Decodificación doble base64 (R4) + validación `estado==1` (I7) | 2 | PDF corrupto o `estado==0` → `FAILED`, nunca se guarda |
+| BQI-43 | `fetch_pdf()` pipeline completo + reintentos (máx. 5, backoff largo) | 2 | Folio recién emitido (aún no en Docele) → reintenta, no falla definitivo de inmediato |
+| BQI-44 | Tests con fixtures Facele | 2 | Cobertura de R4, I7 |
+
+### E5 — Notificaciones Brevo (10 pts)
+
+| ID | Ticket | Pts | Criterio de aceptación |
+|---|---|---|---|
+| BQI-50 | `services/brevo/client.py`: `POST smtp/email` con adjunto | 2 | Correo de prueba recibido con PDF adjunto |
+| BQI-51 | `prepare_email()`: destinatarios (R5), validación de direcciones (I8) | 3 | Email inválido → `SKIPPED`, no bloquea el pedido |
+| BQI-52 | `send_email()` + marca `sent` con `messageId` (I1) | 2 | Fallo de Brevo → `FAILED`, reintenta hasta máx. 3 |
+| BQI-53 | `notify_failure()`: alerta interna con lock anti-spam 1h | 2 | 10 fallos del mismo tipo en 1h → un solo correo |
+| BQI-54 | Tests con fixtures Brevo | 1 | Cobertura de R5, I1, I8 |
+
+### E6 — API, scheduler y observabilidad (10 pts)
+
+| ID | Ticket | Pts | Criterio de aceptación |
+|---|---|---|---|
+| BQI-60 | `GET /health`, `GET /status` (conteos por tabla/estado) | 2 | `/status` refleja el estado real de la BD |
+| BQI-61 | `GET /failures`, `POST /retry/{tabla}/{id}` | 2 | Reintentar un fallo desde la API vuelve a encolar la tarea |
+| BQI-62 | Beat schedule definitivo + heartbeat Healthchecks.io | 2 | Ping registrado en cada ciclo exitoso |
+| BQI-63 | Sentry + `api_logs` | 2 | Excepción no controlada aparece en Sentry con contexto |
+| BQI-64 | Middleware API Key (portar de Stock-Service) | 1 | Petición sin `X-API-Key` → 401 salvo `/health` |
+| BQI-65 | `docs/RUNBOOK.md` | 1 | Documento con qué mirar ante una alerta |
+
+### E7 — Pruebas (8 pts, transversal)
+
+No se implementa al final — cada ticket de E1-E6 se entrega junto con su test. Esta épica cubre lo
+transversal:
+
+| ID | Ticket | Pts | Criterio de aceptación |
+|---|---|---|---|
+| BQI-70 | `conftest.py` + `fixtures/` (payloads SAP, Woo, Facele, Brevo) | 2 | Tests corren sin red ni Docker (SQLite en memoria vía `aiosqlite`) |
+| BQI-71 | `test_invariants_coverage.py` (I1-I8) | 2 | Falla si alguna invariante pierde su test asociado |
+| BQI-72 | Integración del ciclo completo contra mocks (E2E) | 3 | Pedido simulado de punta a punta → `email.status == COMPLETED` |
+| BQI-73 | CI (GitHub Actions): pytest + ruff en cada push | 1 | PR bloqueado si algo falla |
+
+**Total: ~95 pts** (incluye BQI-37, agregado 2026-08-14). Orden: E0 → E1 → E2 → E3 → E4 → E5 → E6, con E7 transversal a todas.
+
+---
+
+## 10. Registro de avance
+
+Se actualiza a medida que se cierra cada ticket: `[ ]` pendiente, `[~]` en curso, `[x]` hecho, con
+fecha y nota breve si algo se desvió del plan.
+
+### E0 — Bootstrap
+- [x] BQI-01 — Esqueleto del repo (2026-08-13)
+- [x] BQI-02 — `core/config.py` (2026-08-13)
+- [x] BQI-03 — `core/database.py` (2026-08-13) — verificado con conexión real a Postgres
+- [x] BQI-04 — Alembic + migración inicial (2026-08-13)
+- [x] BQI-05 — Celery + Beat + locks + heartbeat (2026-08-13) — verificado con disparo manual + Docker
+- [x] BQI-06 — Dockerfile + docker-compose (2026-08-13) — build real + `docker compose up` verificados
+
+### E1 — Sesión y cliente SAP
+- [x] BQI-10 — Portar `sap/session.py` (2026-08-13) — probado contra Token-SAP-BQ real
+- [x] BQI-11 — Portar `sap/client.py` + soporte POST/PATCH (2026-08-13) — probado contra SAP real
+- [ ] BQI-12 — Alta en Token-SAP-BQ — **diferido a antes de producción**, hoy usa credenciales de test de gestorBQ a propósito (ver `memory/project_credenciales_test_vs_prod.md`)
+- [x] BQI-13 — `get_all_pages` (2026-08-13) — probado contra SAP real (21.157 registros paginados)
+- [x] BQI-14 — Tests de sesión/cliente (2026-08-13) — 10/10 tests, portados de Stock-Service
+
+### E2 — Clientes SAP
+- [x] BQI-20 — Modelo `SAPCustomer` + catálogos (2026-08-13) — incluye `DeliveryMethod`/`BillDocumentType`, no solo municipios/industrias como decía el ticket original
+- [x] BQI-21 — export puntual desde Integrify-Consola (2026-08-13) — 97 municipios, 9 industrias, 3 métodos de envío, 9 tipos de documento cargados en Postgres; script y credenciales eliminados después (ver nota)
+- [x] BQI-22 — Validación RUT (2026-08-13) — `app/utils/rut.py::es_rut_valido()`, envuelve `rut_chile` para que nunca lance excepción; 4/4 tests
+- [x] BQI-23 — `find_by_rut` (2026-08-13) — `app/services/sap/customers.py`, probado contra SAP real con RUT `70990700-K`: **hallazgo** — hay 2 BP duplicados en SAP para ese RUT (`CN70990700-K`/`CN70.990.700-k`), decidir criterio de desambiguación en BQI-25/26; 4/4 tests
+- [x] BQI-24 — Sanitización de textos (2026-08-13) — `app/utils/sap_text.py::sanitizar_texto_sap()` (puerto de `utils/sap.py` original) + `app/utils/rut.py::normalizar_rut()`; confirmado contra el hallazgo de BQI-23 (sin puntos es el formato que SAP encuentra); 9/9 tests
+- [x] BQI-25 — `create_or_update` (2026-08-13) — `CustomerPayload`/`create_or_update` en `app/services/sap/customers.py`, 5/5 tests con mock + probado contra SAP real (RUT propio de Felipe, autorizado, `CN21269680-3`): PATCH llegó, SAP devolvió error de negocio real (`-2035 ContactEmployees.Name` duplicado) — confirma que el mecanismo funciona; el error confirma que hace falta la lógica de "código/dirección disponible" de BQI-26 antes de actualizar un cliente existente
+- [x] BQI-26 — Pipeline `resolve_customer()` (2026-08-13) — `app/pipelines/customers.py`, 4/4 tests con mock + verificado de punta a punta contra SAP y Postgres reales (RUT propio de Felipe): status COMPLETED, reutilizó contacto/direcciones existentes (65553/FISCAL/DESPACHO) sin colisión, sanitización confirmada en producción (SAP). **Épica E2 completa.**
+
+**Nota BQI-21 (2026-08-13):** Felipe frenó la ejecución al ver que el script se conectaba a la MySQL
+de producción de Integrify-Consola (DigitalOcean) para preguntar por qué — comportamiento ya
+documentado en `plan.md` §"Migración de datos maestros", pero sin confirmación explícita antes de
+ejecutar la conexión real. Confirmado el alcance (export puntual, una sola vez, sin uso recurrente),
+se corrió: `defaultdb` estaba vacía, la base real es `app` (municipality/sap_municipality/
+woo_municipality/industry/delivery_method/bill_document_type). Extracción exitosa, datos verificados
+en Postgres. Por pedido explícito de Felipe, se eliminó después TODA referencia a esa conexión:
+`scripts/seed_from_legacy.py`, `LEGACY_MYSQL_*` de `.env`/`.env.example`/`core/config.py`, y la
+dependencia `pymysql` del `pyproject.toml`. El proyecto no vuelve a tocar esa base.
+
+**Corrección BQI-21 (2026-08-13, encontrada al construir el glue de E6/BQI-26):** el export original
+de comunas estaba **incompleto** — filtraba `sap_municipality.enabled=1`, que en la MySQL de
+Integrify NO significa "mapeo válido" (250 de 349 filas tienen `enabled=0`, incluyendo comunas reales
+en uso, ej. Angol/`CL_107`). De 32 comunas distintas usadas en los 42 pedidos reales ya guardados,
+**0/32** matcheaban nuestra tabla de 97 filas. Se reconectó una vez más (mismo procedimiento: script
+aislado en `scratchpad`, fuera del proyecto, credenciales borradas al terminar) para extraer el join
+completo sin ese filtro (`municipality ⨝ sap_municipality` por `sap_municipality_id=code`, sin
+condición sobre `enabled`) — **346 filas** (el total real de comunas de Chile), de las cuales las 97
+anteriores coincidían exactamente (no eran incorrectas, solo incompletas). `industries`/
+`delivery_methods`/`bill_document_types` se revisaron por el mismo patrón y NO tienen el problema
+(tablas planas, sin split de 3 tablas, todas `enabled=1`). Tabla `municipalities` en Postgres ahora
+tiene 346 filas correctas.
+
+### E3 — Intake Woo y facturación
+- [x] BQI-30 — `WooCommerceClient` de órdenes (2026-08-13) — `app/services/woocommerce/{client,orders}.py`, probado contra bioquimica.cl real (3003 pedidos `processing`, paginación `X-WP-TotalPages` confirmada). Diseño con miras a que la web nueva cambie el checkout: la transformación de pedido crudo → `woo_orders` (BQI-31) va función-por-campo, no un mapeo único, para que un cambio de payload sea un ajuste acotado (ver `memory/project_woo_payload_cambiante.md`)
+- [x] BQI-31 — `poll_woo_orders()` + circuit breaker (2026-08-13) — `app/models/woo_order.py` + `app/pipelines/woo_orders.py`, 10/10 tests + verificado contra bioquimica.cl y Postgres reales (41 pedidos guardados, dedup confirmado en 2da corrida). Bug real encontrado por los tests antes de producción: `paid_at` llegaba como string, la columna es datetime — corregido con `datetime.fromisoformat`. También corregido bug de mixin: `SyncStatusMixin` compartía una instancia de `Column` entre modelos (`sa_column`→`sa_type`), rompía al agregar el segundo modelo
+- [x] BQI-32 — Cliente Stock-Service (2026-08-13) — `app/services/stockservice/client.py::obtener_producto()`, 3/3 tests + verificado contra Stock-Service y Redis reales con SKU real (`ML000275`, `woo_id=7685` coincide con `product_id` del pedido real — confirma criterio de matching para BQI-33), TTL de caché confirmado (~900s)
+- [x] BQI-33 — `prepare_billing()` (2026-08-13) — `app/models/sap_billing.py` + `app/pipelines/billing.py`, 11/11 tests + verificado contra 2 pedidos reales (flat_rate con envío: totales calzan exacto incl. IVA de envío `ROUND_HALF_UP`; free_shipping sin ítem de envío) e idempotencia confirmada en Postgres real (1 fila tras 2 corridas)
+- [x] BQI-34 — Validación de totales (2026-08-13) — dentro de `prepare_billing`; corregido para que además marque `WooOrder.status=FAILED` con mensaje (no solo lanzar excepción) — criterio real del ticket, 2 tests nuevos
+- [x] BQI-35 — `create_sap_invoice()` (2026-08-13) — `app/services/sap/billing.py` (`BillingPayload`/`BillingItemPayload`) + orquestador en `app/pipelines/billing.py`, 4/4 tests + verificado contra SAP real: factura creada (`DocEntry=103959`, `DocNum=7412`), R1 confirmado en SAP (`DocDate == DocDueDate == "2026-08-13"`). Hallazgo operativo: SAP rechaza CUALQUIER documento si falta la tasa de cambio USD del día — dependencia diaria a tener en cuenta para producción, no es un bug nuestro
+- [x] BQI-36 — Tests de billing (2026-08-13) — cubierto a lo largo de BQI-33/34/35 (24 tests entre `test_billing.py`/`test_create_sap_invoice.py`), no quedó pendiente aparte.
+- [x] BQI-37 — Idempotencia externa `create_sap_invoice` (2026-08-17) — `buscar_factura_existente()` en `app/services/sap/billing.py` + guard de estado y guard robusto en `app/pipelines/billing.py::create_sap_invoice`, 9/9 tests (`test_create_sap_invoice.py`/`test_sap_billing_service.py` nuevo). **Bug real encontrado al probar contra SAP real**: `U_WedDocNum` está tipado como *string* en SAP pese a representar un número — filtrar sin comillas devuelve `400` ("the given value is not a string"); corregido, confirmado `200` contra SAP real. **Épica E3 completa.**
+
+### E4 — Folio y Facele/Docele
+- [x] BQI-40 — `poll_sap_invoices()` (2026-08-13) — `app/models/sap_invoice.py` + `app/pipelines/invoices.py`, 3/3 tests + verificado contra SAP/Postgres reales (factura de prueba sin folio → `nuevas=0`, sin explotar). `seller_email` queda sin llenar a propósito, se resuelve en BQI-51
+- [x] BQI-41 — Cliente Facele/Docele (2026-08-13) — `app/services/facele/client.py::obtener_documento()`, verificado contra **producción** real (folio 42742, tipo 33): `estado=1`, PDF recibido. Sin ambiente de test usable (ver `memory/project_facele_test_es_produccion.md`)
+- [x] BQI-42 — Decodificación + validación de estado (2026-08-13) — `decodificar_pdf()`, confirmado con el folio real: 1 decode da base64 válido, un 2do decode (solo para verificar, no se hace en el pipeline) da PDF real (`%PDF-1.4`). 7/7 tests
+- [x] BQI-43 — Pipeline `fetch_pdf()` (2026-08-13) — `app/pipelines/documents.py`, verificado contra Facele producción + Postgres real (folio 42742, `DocEntry` de prueba `999999002`): `status=COMPLETED`, PDF de 128.796 caracteres persistido
+- [x] BQI-44 — Tests con fixtures Facele (2026-08-13) — 5/5 tests (`test_documents.py`), cubren estado exitoso, estado=0, estado=1 sin PDF, PDF malformado, error de red. **Épica E4 completa.**
+
+### E5 — Notificaciones Brevo
+- [x] BQI-50 — Cliente Brevo (2026-08-13) — `app/services/brevo/client.py`, `BREVO_URL` a config (no hardcodeado)
+- [x] BQI-51 — `prepare_email()` (2026-08-13) — `app/models/email.py` (tabla `emails` nueva, migración aplicada) + `app/pipelines/notifications.py`. R5 confirmado: `contact_email` > `customer_email`; BCC = `BREVO_INVOICE_BCC` + `seller_email`. I8: sin destinatario o dirección inválida → `SKIPPED`
+- [x] BQI-52 — `send_email()` (2026-08-13) — I1: solo `COMPLETED` con `messageId` real de Brevo. Agregado freno no planeado originalmente: fuera de `ENVIRONMENT=production`, el destinatario real se redirige a `ALERT_EMAILS` y el asunto lleva `[PRUEBA]` — así ninguna prueba/automatización en dev puede llegarle a un cliente real aunque la fila tenga su email de verdad
+- [x] BQI-53 — `notify_failure()` (2026-08-13) — anti-spam por `kind` con Redis `INCR`+`EXPIRE` (ventana 1h), fail-open si Redis no responde. No persiste fila en `emails` (alerta best-effort, sin retry propio)
+- [x] BQI-54 — Tests (2026-08-13) — 18/18 tests (`test_notifications.py`), cubre R5, I1, I8 + el freno de entorno. **Épica E5 completa.** 97/97 tests del proyecto
+- [x] Guard de idempotencia en `prepare_email`/`send_email` (2026-08-18, no ticketeado — parte 2 del hallazgo de resiliencia post-caída junto con BQI-37) — `if status == "COMPLETED": return` al inicio de ambas funciones en `app/pipelines/notifications.py`, evita reenviar un correo real al cliente ante un reintento. 2 tests nuevos en `test_notifications.py`. 112/112 tests del proyecto
+
+**Cambio de transporte (2026-08-18):** `notify_failure()` dejó de usar Brevo — a pedido explícito de
+Felipe, las alertas internas de error van por **SMTP directo** (Gmail/Google Workspace,
+`smtp.gmail.com:587`, cuenta `no-reply@bioquimica.cl`), separado del canal de Brevo que sigue
+siendo exclusivo para `CUSTOMER_INVOICE`. Nuevo `app/services/smtp/client.py` (smtplib + STARTTLS).
+`EMAIL_SMTP_HOST`/`EMAIL_SMTP_PORT`/`EMAIL_SENDER`/`EMAIL_PASSWORD` en `.env`/`core/config.py`.
+Tests actualizados (incluye regresión explícita "notify_failure no debe usar brevo_client"). Probado
+en vivo: `notify_failure()` real devolvió `True`, correo real enviado a felipe.morales@bioquimica.cl.
+154/154 tests, `ruff check .` limpio.
+
+**Verificación real (2026-08-13):** `prepare_email`+`send_email`+`notify_failure` corridos contra Brevo real (factura de prueba `doc_entry=999999002`/folio `42742`, `notify_failure("verificacion_bqi53", ...)`). Hallazgo operativo: Brevo bloqueó el primer intento por IP no autorizada del servidor on-prem (`152.230.53.151`) — no es bug, hay que autorizar la IP en Brevo (Security → Authorised IPs) una sola vez; ya autorizada, el reintento devolvió `messageId` real (`...@smtp-relay.mailin.fr`) y `notify_failure` devolvió `True`. `BREVO_SENDER_NAME`/`EMAIL`/`ALERT_EMAILS`/`BREVO_INVOICE_BCC` reales (external/failure recipients de Strapi de Integrify) quedan diferidos a antes de producción — hoy `.env` solo apunta a felipe.morales@bioquimica.cl (ver `memory/project_brevo_destinatarios.md`).
+
+### E6 — API, scheduler y observabilidad
+- [x] Glue `construir_datos_cliente()` (2026-08-13, no ticketeado originalmente) — `app/pipelines/customers.py`. Hueco real encontrado al preparar el wiring de Beat: `resolve_customer()` esperaba un dict que nada armaba desde `WooOrder.billing_address`/`shipping_address`. Mapeo confirmado línea por línea contra `app/customers/models/sap_customer.py::clean()` de Integrify (no un comando separado). 9/9 tests nuevos + verificado contra 5 pedidos reales guardados (sin tocar SAP). **Corrigió en el camino un bug real de datos**: el catálogo `municipalities` (BQI-21) estaba incompleto — filtraba `sap_municipality.enabled=1` en la MySQL de Integrify, que no significa "mapeo válido" (0/32 comunas reales de los 42 pedidos guardados matcheaban). Re-extraído sin ese filtro: 346 comunas (antes 97), ver nota en BQI-21 arriba
+- [x] BQI-60 — `/health`, `/status` (2026-08-18) — `app/main.py` (no existía, pese a que Dockerfile/docker-compose ya apuntaban a `app.main:app` desde BQI-06) + `app/api/routes/status.py`. Probado con `uvicorn` local contra Postgres real: ambos responden 200, `/status` refleja conteos reales (42 woo_orders, etc.). 112/112 tests
+- [x] BQI-61 — `/failures`, `/retry` (2026-08-18) — modelo `Failure` (migración `79e3d05f4c0a` aplicada contra Postgres real; bugs de la migración autogenerada corregidos: faltaba `import sqlmodel`, `error_message` quedaba `nullable=True` pese a ser obligatorio). `app/api/routes/failures.py`: `GET /failures` + `POST /retry/{tabla}/{entity_id}` como **llamada síncrona directa** a la función de pipeline correspondiente (decisión explícita: las fases 3/5/6/7 no tienen tarea Celery propia todavía — encolar de verdad es trabajo de conectar el orquestador real, fuera de este ticket). `sap_customers` es el caso especial: reconstruye `datos_cliente` buscando el `WooOrder` más reciente con el mismo `tax_id`, ya que `SAPCustomer` no guarda a qué pedido pertenece. **Bug real encontrado por los tests antes de producción**: el `except Exception` de `reintentar()` también atrapaba los `HTTPException` (422) que lanzan `_reintentar_sap_customer`/`_reintentar_sap_billing` cuando no encuentran el `WooOrder` asociado — los silenciaba y devolvía 200 en vez de propagar el error; corregido con `except HTTPException: raise` antes del catch genérico. Probado en vivo contra Postgres real (`GET /failures` vacío, 404 tabla inválida, 404 id inexistente, 409 ya completado) + 12 tests nuevos con mocks para el camino feliz de las 5 tablas. 124/124 tests, `ruff check .` limpio. **Épica E6 en curso** (quedan BQI-62/63/64/65 y el orquestador real que conecte las fases)
+- [x] BQI-62 — Beat schedule + heartbeat (2026-08-18) — el código (`app/tasks/locks.py`, `app/tasks/heartbeat.py`, `beat_schedule` en `celery_app.py`) ya existía completo desde BQI-05, pero sin ningún test. Agregados `tests/test_locks.py` (5 tests), `tests/test_heartbeat.py`, `tests/test_celery_app.py` (sanidad del `beat_schedule`). **Cambio de diseño real, encontrado al probar contra la cuenta real de Healthchecks.io**: el esquema original (`HEALTHCHECKS_PING_KEY` + auto-provisioning por slug, URL `/ping-key/slug`) devolvía `404 not found` pese a una key válida — probablemente auto-provisioning deshabilitado/de plan pago en esta cuenta. Cambiado a ping directo por UUID de check (`HEALTHCHECKS_CHECKS="slug:uuid,slug:uuid"`, un check creado a mano por tarea, uno por cada tarea de Beat). 135/135 tests, `ruff check .` limpio. Ambos checks ("poll-woo-orders", "poll-sap-invoices") verificados en vivo contra la cuenta real (start+éxito, `200 OK`) — el camino `/fail` no se probó en vivo a propósito (dispararía una alerta real si Felipe tiene notificaciones configuradas), queda cubierto solo por los tests con mock. **Épica E6**: quedan BQI-63 (Sentry + api_logs), BQI-64 (API Key), BQI-65 (RUNBOOK.md) y el orquestador real que conecte las 7 fases
+- [x] BQI-63 — Sentry + `api_logs` (2026-08-18) — `app/core/sentry.py`, puerto directo de Stock-Service (ya genérico). Conectado en `app/main.py` (`init_sentry("web")`) y `app/tasks/celery_app.py` (`init_sentry("worker")`, cubre worker y beat). 5 tests nuevos (no-op sin DSN, inicializa con DSN, idempotente, no rompe si el SDK falla). 139/139 tests, `ruff check .` limpio, confirmado que `uvicorn` sigue arrancando bien con el cambio. `SENTRY_DSN` real agregado a `.env` — probado con una excepción real (`ValueError`) capturada y enviada con `sentry_sdk.capture_exception()` + `flush()`, **confirmado visualmente por Felipe en el dashboard**. Sentry cerrado.
+
+**`api_logs` (2026-08-18) — cerrado.** Puerto completo del patrón de Stock-Service: cola en Redis (`app/core/api_log.py::log_api_call`/`drain_api_logs`/`make_response_hook`) + modelo `ApiLog` (migración `25f41acdd5b1`, mismo bug de `import sqlmodel` faltante corregido antes de aplicar) + `app/pipelines/cleanup.py::flush_api_logs` + tarea `task_flush_api_logs` (nueva, cada 5 min, agregada también `_run_async` — primera vez que este proyecto invoca una función async real desde una tarea Celery). Hook enganchado en los 5 clientes HTTP (`SAP`, `TokenSAP`, `WooCommerce`, `Facele`, `StockService`) vía `_http.hooks["response"].append(...)`. Solo Token-SAP-BQ (`/session`/`/session/invalidate`) manda password en el body — confirmado que ningún otro cliente lo hace (Facele/StockService van por header, Woo/SAP por auth/cookies), así que se mantuvo el filtro por path simple de Stock-Service sin necesitar redacción de secretos por valor. Pequeño refactor de paso: `_utc_now_naive()` (antes privada y duplicable en `mixins.py`) pasó a `app/utils/dates.py::utc_now_naive()` compartida, usada también por `ApiLog`/`Failure`. **Verificado en vivo, extremo a extremo**: llamada real a Stock-Service → encolada en Redis → `flush_api_logs` → fila real en Postgres (`id=1`, `StockService`, `200`); llamada real a `/session` de Token-SAP-BQ → confirmado `request_body: null` (password nunca se registra). 152/152 tests, `ruff check .` limpio. **Épica E6**: quedan BQI-64 (API Key), BQI-65 (RUNBOOK.md) y el orquestador real — es más grande (cola en Redis + modelo + tarea Celery de flush + hook en 5 clientes HTTP), se aborda como su propio paso
+- [x] **Orquestador manual — `POST /pipeline/sync-order/{code}`** (2026-08-18, no ticketeado — a pedido de Felipe, antes de conectar Beat) — `app/pipelines/orchestrator.py::sync_order_to_sap()` encadena `resolve_customer` → `prepare_billing` → `create_sap_invoice` (por chunk) para UN pedido puntual, trayéndolo de WooCommerce si todavía no está en `woo_orders` (`app/services/woocommerce/orders.py::obtener_pedido()`, nuevo — GET por ID). Nunca lanza sin manejar: devuelve qué fase falló y qué sí se logró; un chunk fallido no bloquea a los demás (I2). 7 tests nuevos con mocks. **Probado en vivo contra SAP TEST real** con pedido `27385`: cliente resuelto (`CN20195519-K`), factura trocaeada, falló la creación en SAP con el error ya conocido de tasa de cambio (`code -10`, ver `memory/project_tasa_cambio_sap.md`) — confirma que el endpoint reporta fallos puntuales sin romperse. Pendiente: definir y armar el segundo endpoint que pidió Felipe, y el flag on/off (Redis) para cuando se conecte Beat.
+
+- [x] **Servicio de carga automática de tasa de cambio** (2026-08-18, no ticketeado — resuelve de raíz el hallazgo de BQI-35/`memory/project_tasa_cambio_sap.md`) — `app/services/sap/exchange_rates.py::asegurar_tasa_cambio(fecha)`. Confirmado contra SAP real (vía `$metadata`) que existen `SBOBobService_GetCurrencyRate`/`SBOBobService_SetCurrencyRate` — **los parámetros van en el body JSON, no en query params**, a pesar de ser FunctionImport (mismo tipo de sorpresa que `U_WedDocNum` en BQI-37: nunca asumir el formato de una llamada nueva a SAP sin probarla). Fuente del valor: mindicador.cl (mismo proveedor que ya usa Stock-Service, aunque ese caso solo lee — nunca escribe en SAP). Cachea la confirmación en Redis 20h para no golpear SAP/mindicador.cl en cada factura del mismo día. Enganchado en `create_sap_invoice` (`app/pipelines/billing.py`), antes de armar el payload — si falla, `FAILED` + `TransientError` con mensaje explícito, sin llegar a tocar el POST de la factura. 8 tests nuevos + 1 de regresión en `test_create_sap_invoice.py`. **Verificado en vivo, dos veces, con pedidos reales de fechas distintas** (`27385`/06-08, `27469`/07-08) que no tenían su tasa histórica cargada — ambos terminaron `COMPLETED` (`DocEntry 103964`/`103966`) sin ninguna carga manual, el servicio la detectó y cargó solo. 169/169 tests, `ruff check .` limpio.
+- [x] **Interruptor on/off + Chain A automática conectada a Beat** (2026-08-18, no ticketeado) —
+  `app/core/pipeline_state.py` (Redis `pipeline:enabled`, falla CERRADO si Redis cae — al revés que
+  `pipeline_lock`, que falla abierto — nunca "procesar a ciegas"). Endpoints `GET/POST /pipeline/status`,
+  `/enable`, `/disable`. `app/pipelines/failure_tracking.py::escalar_si_agotado()` — al agotar
+  `RESOLVE_CUSTOMER_MAX_ATTEMPTS`/`SAP_BILLING_MAX_ATTEMPTS` (ya existían en `.env`, nunca se usaban),
+  sube a `EXHAUSTED`, crea fila en `failures`, dispara `notify_failure` (I6) — enganchado en `/retry` y
+  en el batch automático. `procesar_pedidos_pendientes()` (orchestrator.py) reintenta `PENDING` y
+  `FAILED` (no solo `PENDING`) en 2 grupos: WooOrder sin trocear, y `SAPBilling` ya troceado pero sin
+  factura (para no perder chunks fallidos que quedaron "invisibles" tras el troceo exitoso). Conectado
+  en `task_poll_woo_orders`. 186/186 tests, `ruff check .` limpio.
+
+  **Incidente real al probar en vivo (2026-08-18):** con el flag prendido, la primera corrida detectó
+  **3031 "pedidos nuevos"** (I3) — `poll_woo_orders()` se llamaba sin `modified_after`, trayendo TODA
+  la historia de `processing` de bioquimica.cl, no solo lo reciente. Se frenó a tiempo (`TaskStop`) tras
+  procesar 83 pedidos / crear 54 facturas reales en SAP TEST — sin daño real porque es TEST, pero el
+  bug era serio: en producción habría reprocesado pedidos que Integrify ya facturó hace meses, cada
+  5 minutos, para siempre. **Fix, calcado del patrón de Integrify-Consola** (confirmado con agente:
+  Integrify usa `modified_after = hoy - 1 día hábil` recalculado en cada corrida, SIN checkpoint
+  persistido — la protección real es el dedup por `code`, que BQI-31 ya tenía): `WOO_POLL_LOOKBACK_DAYS`
+  nuevo (default 1, en `.env`), `_ciclo_woo_orders()` calcula `modified_after` con eso. Verificado en
+  vivo: WooCommerce devolvió 3031 pedidos sin el filtro, **14 con el filtro**. Los ~3000 pedidos que
+  quedaron mal ingeridos en esta base de prueba no se limpiaron — Felipe confirmó que no importa,
+  es entorno de prueba, se limpia/recrea la base antes de producción (ver plan de corte más abajo).
+- [ ] BQI-64 — Middleware API Key
+- [ ] BQI-65 — `RUNBOOK.md`
+- [ ] Chain B automática (folio → PDF → email) — falta conectar `task_poll_sap_invoices`, mismo patrón
+  que Chain A (reintentar FAILED + escalar a EXHAUSTED vía `failure_tracking`)
+
+### E7 — Pruebas (transversal)
+- [ ] BQI-70 — `conftest.py` + fixtures
+- [ ] BQI-71 — `test_invariants_coverage.py`
+- [ ] BQI-72 — E2E contra mocks
+- [ ] BQI-73 — CI
+
+---
+
+## 10.1 Checklist de corte a producción
+
+Nada de esto es urgente durante el desarrollo — son cambios de `.env`/infraestructura, no de código,
+diferidos a propósito hasta que se decida ir a producción. Consolidado acá para no perder ninguno:
+
+- [ ] **Base de datos nueva** (2026-08-18) — no reutilizar/limpiar la de desarrollo (quedó con datos
+  de prueba, incl. los ~3000 pedidos del incidente de polling). `alembic upgrade head` contra una base
+  vacía crea el esquema de cero. Migrar a mano los 4 catálogos estáticos ya validados
+  (`municipalities`/`industries`/`delivery_methods`/`bill_document_types`, los 346 municipios de
+  BQI-21) vía `pg_dump`/`COPY` desde la base de desarrollo — no reconectar a la MySQL de Integrify.
+- [ ] BQI-12 — Alta de `bq-integraciones` en `AUTHORIZED_SERVICES` de Token-SAP-BQ de **producción**
+  (hoy usa credenciales de test de `gestor-bq`, ver `memory/project_credenciales_test_vs_prod.md`).
+- [ ] Compañía SAP de producción real en `SAP_URL`/sesión (hoy `CLTSTBIOQUIMICA`, confirmado por
+  `sap_db` de la sesión de Token-SAP-BQ — ver hallazgo 2026-08-18).
+- [ ] Destinatarios reales de Brevo (`BREVO_INVOICE_BCC`/`ALERT_EMAILS`, sacados de Strapi de
+  Integrify — ver `memory/project_brevo_destinatarios.md`; hoy todo apunta a felipe.morales@bioquimica.cl).
+- [ ] `ENVIRONMENT=production` — sin esto, `send_email()` sigue redirigiendo todo a `ALERT_EMAILS`
+  con `[PRUEBA]`, ningún correo llega a un cliente real (freno ya construido y probado, BQI-52).
+- [ ] `pipeline_state` arranca apagado por defecto — decidir explícitamente cuándo prenderlo
+  (`POST /pipeline/enable`) recién con todo lo anterior confirmado.
+
+## 11. Resumen del estado del proyecto
+
+*(se completa al cierre de cada sesión de implementación — qué se hizo, qué quedó pendiente, qué se
+descubrió que cambia el plan)*

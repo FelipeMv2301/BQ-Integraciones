@@ -1,0 +1,57 @@
+// leyenda: fijo · opcional · woo:<campo> · interno (resuelto en SAP/catálogo, no copia directa de Woo)
+{
+  "CardCode": "CN11111111-1",              // interno: CN+rut si es nuevo, o el CardCode ya existente
+  "CardName": "Empresa Ejemplo Limitada",  // woo: billing.company (o first_name+last_name)
+  "FederalTaxID": "11111111-1",            // woo: billing.tax_id
+  "U_NX_GIRO": "Venta al por menor...",    // opcional, woo: billing.business_activity
+  "Phone1": "+56912345678",                // woo: billing.phone
+  "EmailAddress": "contacto@...",          // woo: billing.email
+  "CardType": "C",                         // fijo
+  "GroupCode": "100",                      // fijo
+  "SalesPersonCode": "25",                 // fijo
+  "DebitorAccount": "1140101",             // fijo
+  "ContactPerson": "Juan Pérez",           // interno: contacto WEB ya existente en SAP, o "CONTACTO" si es nuevo
+  "U_ActEconomica": "AE3",                 // opcional, interno: catálogo Industry <- woo: billing.industry_id
+
+  "BPAddresses": [
+    {
+      "BPCode": "CN11111111-1",
+      "AddressType": "bo_BillTo",          // fijo por fila
+      "AddressName": "FISCAL",             // interno: nombre reutilizado o "FISCAL" nuevo
+      "AddressName2": "WEB",               // fijo
+      "RowNum": 0,                         // interno
+      "Street": "Av. Siempre Viva 123",    // woo: billing.address_1+address_2
+      "County": "Providencia",             // interno: catálogo Municipality <- woo: billing.state
+      "City": "Providencia",
+      "State": "Metropolitana de Santiago",
+      "Country": "CL",                     // fijo
+      "TaxCode": "IVA"                     // fijo
+    },
+    {
+      "BPCode": "CN11111111-1",
+      "AddressType": "bo_ShipTo",
+      "AddressName": "DESPACHO",           // interno: nombre reutilizado o "DESPACHO" nuevo
+      "AddressName2": "WEB",
+      "RowNum": 1,
+      "Street": "Av. Siempre Viva 123",    // woo: shipping.address_1+address_2
+      "County": "Providencia",             // interno: catálogo Municipality <- woo: shipping.state
+      "City": "Providencia",
+      "State": "Metropolitana de Santiago",
+      "Country": "CL",
+      "TaxCode": "IVA"
+    }
+  ],
+
+  "ContactEmployees": [
+    {
+      "InternalCode": 0,                   // interno
+      "CardCode": "CN11111111-1",
+      "Name": "Juan Pérez",                // woo: shipping.first_name+last_name (no billing)
+      "Remarks1": "WEB",                   // fijo
+      "FirstName": "Juan",                 // woo: shipping.first_name
+      "LastName": "Pérez",                 // woo: shipping.last_name
+      "MobilePhone": "+56912345678",       // woo: billing.phone
+      "E_Mail": "contacto@..."             // woo: billing.email
+    }
+  ]
+}

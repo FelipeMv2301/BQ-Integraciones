@@ -1,0 +1,63 @@
+{
+  "U_IX_Ind": "39",
+  "CardCode": "CN11111111-1",
+  "CntctCode": "CONTACTO",
+  "ShipToCode": "DESPACHO",
+  "PayToCode": "FISCAL",
+  "DocDate": "2026-08-25",
+  "TaxDate": "2026-08-25",
+  "DocDueDate": "2026-08-25",
+  "PaymentGroupCode": -1,
+  "DocTotal": 20850,
+  "SalesPersonCode": "25",
+  "U_BQ_AREA": "TRA",
+  "U_VentaWeb": "Y",
+  "U_TipoVenta": "WEB",
+  "U_WedDocNum": 25123,
+  "Comments": "Pedido web 25123",
+  "U_NX_Observacion": "Pedido web 25123",
+  "U_BQ_CodVoucher": "009626",
+  "U_IXP_EXCLUDED": "N",
+  "U_Traspaso_FE": "N",
+  "U_IndTraslado": "1",
+  "U_TipoDesp": "2",
+  "DocumentSubType": "bod_Bill",
+  "DocumentLines": [
+    {
+      "ItemCode": "ML000845",
+      "Quantity": 1,
+      "UnitPrice": 10000,
+      "DiscountPercent": 0,
+      "LineTotal": 10000,
+      "WarehouseCode": "01",
+      "CostingCode": "CG3060",
+      "CostingCode2": "CC1000",
+      "VatGroup": "IVA",
+      "TaxCode": "IVA"
+    },
+    {
+      "ItemCode": "ML000847",
+      "Quantity": 1,
+      "UnitPrice": 5000,
+      "DiscountPercent": 0,
+      "LineTotal": 5000,
+      "WarehouseCode": "01",
+      "CostingCode": "CG3060",
+      "CostingCode2": "CC1000",
+      "VatGroup": "IVA",
+      "TaxCode": "IVA"
+    },
+    {
+      "ItemCode": "SGchistn",
+      "Quantity": 1,
+      "UnitPrice": 2521,
+      "DiscountPercent": 0,
+      "LineTotal": 2521,
+      "WarehouseCode": "01",
+      "CostingCode": "CG3060",
+      "CostingCode2": "CC1000",
+      "VatGroup": "IVA",
+      "TaxCode": "IVA"
+    }
+  ]
+}

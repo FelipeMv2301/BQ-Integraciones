@@ -1,0 +1,415 @@
+{
+  "id": 28467,
+  "parent_id": 0,
+  "status": "processing",
+  "currency": "CLP",
+  "version": "10.7.0",
+  "prices_include_tax": true,
+  "date_created": "2026-08-21T04:51:53",
+  "date_modified": "2026-08-21T04:56:59",
+  "discount_total": "0",
+  "discount_tax": "0",
+  "shipping_total": "12120",
+  "shipping_tax": "0",
+  "cart_tax": "6017",
+  "total": "49804",
+  "total_tax": "6017",
+  "customer_id": 0,
+  "order_key": "wc_order_HJz5mHuCREHMd",
+  "billing": {
+    "first_name": "Diego",
+    "last_name": "Apablaza",
+    "company": "",
+    "address_1": "Los Onas 478",
+    "address_2": "",
+    "city": "",
+    "state": "CL_168",
+    "postcode": "",
+    "country": "CL",
+    "email": "diegoapablazagg@gmail.com",
+    "phone": "+56975790120",
+    "document_type": "39",
+    "tax_id": "20695263-6",
+    "industry_id": "SILVO"
+  },
+  "shipping": {
+    "first_name": "Diego",
+    "last_name": "Apablaza",
+    "company": "",
+    "address_1": "Los Onas 478",
+    "address_2": "",
+    "city": "",
+    "state": "CL_168",
+    "postcode": "",
+    "country": "CL",
+    "phone": "+56975790120",
+    "shipping_note": ""
+  },
+  "payment_method": "transbank_webpay_plus_rest",
+  "payment_method_title": "Webpay Plus",
+  "transaction_id": "",
+  "customer_ip_address": "190.5.36.11",
+  "customer_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 OPR/134.0.0.0",
+  "created_via": "store-api",
+  "customer_note": "",
+  "date_completed": null,
+  "date_paid": "2026-08-21T04:56:47",
+  "cart_hash": "b607ebead1552b91bd594de60d52d510",
+  "number": "25077",
+  "meta_data": [
+    {
+      "id": 247984,
+      "key": "_coupons_hash",
+      "value": "d751713988987e9331980363e24189ce"
+    },
+    {
+      "id": 247985,
+      "key": "_fees_hash",
+      "value": "d751713988987e9331980363e24189ce"
+    },
+    {
+      "id": 248038,
+      "key": "_ga_tracked",
+      "value": "1"
+    },
+    {
+      "id": 247990,
+      "key": "_guest_access_token",
+      "value": "3d5a1a29289bdb7f571eb9327b3d0055"
+    },
+    {
+      "id": 248015,
+      "key": "_order_number",
+      "value": "25077"
+    },
+    {
+      "id": 248037,
+      "key": "_pys_purchase_event_fired",
+      "value": "1"
+    },
+    {
+      "id": 247983,
+      "key": "_shipping_hash",
+      "value": "9c7fdcd42a3c7170c934715eb464d2f0"
+    },
+    {
+      "id": 247986,
+      "key": "_taxes_hash",
+      "value": "e1078a436051f67a2b1e8d2184ce3449"
+    },
+    {
+      "id": 247991,
+      "key": "_wc_billing/bioquimicacl/shipping_note",
+      "value": ""
+    },
+    {
+      "id": 248010,
+      "key": "_wc_order_attribution_device_type",
+      "value": "Desktop"
+    },
+    {
+      "id": 248000,
+      "key": "_wc_order_attribution_referrer",
+      "value": "https://www.google.com/"
+    },
+    {
+      "id": 248008,
+      "key": "_wc_order_attribution_session_count",
+      "value": "6"
+    },
+    {
+      "id": 248005,
+      "key": "_wc_order_attribution_session_entry",
+      "value": "https://bioquimica.cl/producto/kit-de-tincion-gram-100-ml/?campaignid=20876003489&adgroupid=&adid=&utm_term=&utm_campaign=&utm_source=adwords&utm_medium=ppc&hsa_acc=7380801775&hsa_cam=20876003489&hsa_grp=&hsa_ad=&hsa_src=x&hsa_tgt=&hsa_kw=&hsa_mt=&hsa_net=adwords&hsa_ver=3&gad_source=1&gad_campaignid=22984143995&gclid=Cj0KCQjwnIDUBhDrARIsAJDGwSvY_Q2J6zf8bVJ09HgLePbWiEKrWX_QztBZwYIcyH_FFyEcc5ci_E0aAspBEALw_wcB"
+    },
+    {
+      "id": 248007,
+      "key": "_wc_order_attribution_session_pages",
+      "value": "2"
+    },
+    {
+      "id": 248006,
+      "key": "_wc_order_attribution_session_start_time",
+      "value": "2026-08-19 02:56:53"
+    },
+    {
+      "id": 247999,
+      "key": "_wc_order_attribution_source_type",
+      "value": "utm"
+    },
+    {
+      "id": 248009,
+      "key": "_wc_order_attribution_user_agent",
+      "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 OPR/134.0.0.0"
+    },
+    {
+      "id": 248001,
+      "key": "_wc_order_attribution_utm_campaign",
+      "value": ""
+    },
+    {
+      "id": 248003,
+      "key": "_wc_order_attribution_utm_medium",
+      "value": "ppc"
+    },
+    {
+      "id": 248002,
+      "key": "_wc_order_attribution_utm_source",
+      "value": "adwords"
+    },
+    {
+      "id": 248004,
+      "key": "_wc_order_attribution_utm_term",
+      "value": ""
+    },
+    {
+      "id": 247992,
+      "key": "_wc_other/bioquimicacl/billing_document_type",
+      "value": "39"
+    },
+    {
+      "id": 247993,
+      "key": "_wc_other/bioquimicacl/industry",
+      "value": "SILVO"
+    },
+    {
+      "id": 247994,
+      "key": "_wc_other/bioquimicacl/tax_id",
+      "value": "20695263-6"
+    },
+    {
+      "id": 247995,
+      "key": "_wc_shipping/bioquimicacl/shipping_note",
+      "value": ""
+    },
+    {
+      "id": 248031,
+      "key": "_wcdn_deliverynote_date",
+      "value": "1787302607"
+    },
+    {
+      "id": 248033,
+      "key": "_wcdn_deliverynote_pdf",
+      "value": "delivery-note-25077-98b596a49abd91cf60981608.pdf"
+    },
+    {
+      "id": 248032,
+      "key": "_wcdn_deliverynote_pdf_token",
+      "value": "98b596a49abd91cf60981608"
+    },
+    {
+      "id": 248030,
+      "key": "_wcdn_invoice_number",
+      "value": "INV-25077"
+    },
+    {
+      "id": 248029,
+      "key": "_wcdn_invoice_number_counter",
+      "value": "741"
+    },
+    {
+      "id": 248034,
+      "key": "_wcdn_packingslip_date",
+      "value": "1787302608"
+    },
+    {
+      "id": 248036,
+      "key": "_wcdn_packingslip_pdf",
+      "value": "packing-slip-25077-0a0b56e8db91f418e835089f.pdf"
+    },
+    {
+      "id": 248035,
+      "key": "_wcdn_packingslip_pdf_token",
+      "value": "0a0b56e8db91f418e835089f"
+    },
+    {
+      "id": 248024,
+      "key": "amount",
+      "value": "49804"
+    },
+    {
+      "id": 248021,
+      "key": "authorizationCode",
+      "value": "640628"
+    },
+    {
+      "id": 248020,
+      "key": "buyOrder",
+      "value": "wc-42fcd79f-28467"
+    },
+    {
+      "id": 248022,
+      "key": "cardNumber",
+      "value": "3928"
+    },
+    {
+      "id": 248025,
+      "key": "installmentsNumber",
+      "value": "0"
+    },
+    {
+      "id": 247987,
+      "key": "is_vat_exempt",
+      "value": "no"
+    },
+    {
+      "id": 248023,
+      "key": "paymentType",
+      "value": "Débito"
+    },
+    {
+      "id": 248016,
+      "key": "pys_enrich_data",
+      "value": {
+        "pys_landing": "https://bioquimica.cl/producto/kit-de-tincion-gram-100-ml/",
+        "pys_source": "google.com",
+        "pys_utm": "utm_source:undefined|utm_medium:undefined|utm_campaign:undefined|utm_term:undefined|utm_content:undefined",
+        "pys_utm_id": "fbadid:undefined|gadid:undefined|padid:undefined|bingid:undefined",
+        "last_pys_landing": "https://bioquimica.cl/producto/kit-de-tincion-gram-100-ml/",
+        "last_pys_source": "direct",
+        "last_pys_utm": "utm_source:undefined|utm_medium:undefined|utm_campaign:undefined|utm_term:undefined|utm_content:undefined",
+        "last_pys_utm_id": "fbadid:undefined|gadid:undefined|padid:undefined|bingid:undefined",
+        "pys_browser_time": "08-09|Friday|August"
+      }
+    },
+    {
+      "id": 248026,
+      "key": "transactionDate",
+      "value": "21-08-2026 04:54:50 -04:00"
+    },
+    {
+      "id": 248028,
+      "key": "transactionResponse",
+      "value": "{\"vci\":\"TSYF\",\"status\":\"AUTHORIZED\",\"responseCode\":0,\"amount\":49804,\"authorizationCode\":\"640628\",\"paymentTypeCode\":\"VD\",\"accountingDate\":\"0821\",\"installmentsNumber\":0,\"installmentsAmount\":null,\"sessionId\":\"wc:sessionId:6a881259aea0f:28467\",\"buyOrder\":\"wc-42fcd79f-28467\",\"cardNumber\":\"3928\",\"cardDetail\":{\"card_number\":\"3928\"},\"transactionDate\":\"2026-08-21T08:54:50.009Z\",\"balance\":null}"
+    },
+    {
+      "id": 248019,
+      "key": "transactionStatus",
+      "value": "Autorizada"
+    },
+    {
+      "id": 248027,
+      "key": "webpay_transaction_id",
+      "value": "2667"
+    }
+  ],
+  "line_items": [
+    {
+      "id": 71518,
+      "name": "Kit de Tinción Gram - 100 mL",
+      "product_id": 14793,
+      "variation_id": 0,
+      "quantity": 1,
+      "tax_class": "",
+      "subtotal": "31667",
+      "subtotal_tax": "6017",
+      "total": "31667",
+      "total_tax": "6017",
+      "taxes": [
+        {
+          "id": 1,
+          "total": "6017",
+          "subtotal": "6017"
+        }
+      ],
+      "meta_data": [
+        {
+          "id": 624035,
+          "key": "_wpced_date",
+          "value": "<div class=\"wpced wpced-14793 wpced-product wpced-l3ag\" data-id=\"14793\"><div class=\"wpced-inner\">Earliest estimated delivery date: Viernes, 21 Agosto - Viernes, 21 Agosto</div></div>",
+          "display_key": "_wpced_date",
+          "display_value": "Earliest estimated delivery date: Viernes, 21 Agosto - Viernes, 21 Agosto"
+        },
+        {
+          "id": 624042,
+          "key": "_reduced_stock",
+          "value": "1",
+          "display_key": "_reduced_stock",
+          "display_value": "1"
+        }
+      ],
+      "sku": "EK004GRM",
+      "global_unique_id": "",
+      "price": 31667.226891,
+      "image": {
+        "id": "28294",
+        "src": "https://bioquimica.cl/wp-content/uploads/2026/02/EK004GRM_1-scaled.jpg"
+      },
+      "parent_name": null
+    }
+  ],
+  "tax_lines": [
+    {
+      "id": 71515,
+      "rate_code": "IVA-1",
+      "rate_id": 1,
+      "label": "IVA",
+      "compound": false,
+      "tax_total": "6017",
+      "shipping_tax_total": "0",
+      "rate_percent": 19,
+      "meta_data": []
+    }
+  ],
+  "shipping_lines": [
+    {
+      "id": 71519,
+      "method_title": "Despacho",
+      "method_id": "flat_rate",
+      "instance_id": "54",
+      "total": "12120",
+      "total_tax": "0",
+      "taxes": [],
+      "tax_status": "taxable",
+      "meta_data": [
+        {
+          "id": 624041,
+          "key": "Artículos",
+          "value": "Kit de Tinción Gram - 100 mL &times; 1",
+          "display_key": "Artículos",
+          "display_value": "Kit de Tinción Gram - 100 mL &times; 1"
+        }
+      ]
+    }
+  ],
+  "fee_lines": [],
+  "coupon_lines": [],
+  "refunds": [],
+  "payment_url": "https://bioquimica.cl/finalizar-compra/order-pay/28467/?pay_for_order=true&key=wc_order_HJz5mHuCREHMd",
+  "is_editable": false,
+  "needs_payment": false,
+  "needs_processing": true,
+  "date_created_gmt": "2026-08-21T08:51:53",
+  "date_modified_gmt": "2026-08-21T08:56:59",
+  "date_completed_gmt": null,
+  "date_paid_gmt": "2026-08-21T08:56:47",
+  "pay_authorization_code": "640628",
+  "currency_symbol": "$",
+  "_links": {
+    "self": [
+      {
+        "href": "https://bioquimica.cl/wp-json/wc/v3/orders/28467",
+        "targetHints": {
+          "allow": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ]
+        }
+      }
+    ],
+    "collection": [
+      {
+        "href": "https://bioquimica.cl/wp-json/wc/v3/orders"
+      }
+    ],
+    "email_templates": [
+      {
+        "embeddable": true,
+        "href": "https://bioquimica.cl/wp-json/wc/v3/orders/28467/actions/email_templates"
+      }
+    ]
+  }
+}

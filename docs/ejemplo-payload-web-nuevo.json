@@ -1,0 +1,136 @@
+{
+  "schema_version": "1.0",
+  "source": {
+    "system": "WooCommerce",
+    "site": "https://bioquimica.devwebs.cl/",
+    "generated_at": "2026-08-20T18:10:17-03:00"
+  },
+  "sap_reference": {
+    "external_id": "bioquimica-1-5914",
+    "woocommerce_order_id": 5914,
+    "woocommerce_order_number": "5914",
+    "sap_document_id": null
+  },
+  "order": {
+    "id": 5914,
+    "number": "5914",
+    "parent_id": 0,
+    "status": "on-hold",
+    "status_label": "En espera",
+    "created_at": "2026-08-20T17:53:34+00:00",
+    "updated_at": "2026-08-20T17:53:47+00:00",
+    "created_via": "checkout",
+    "customer_note": "pedido de prueba"
+  },
+  "customer": {
+    "id": 1,
+    "username": "angelo@piso29.cl",
+    "email": "angelo@piso29.cl",
+    "first_name": "angelo",
+    "last_name": "caro",
+    "phone": "+56951306275",
+    "company": "piso29"
+  },
+  "tax_document": {
+    "type": null,
+    "tax_id": "11222333-2",
+    "document_number": null,
+    "business_name": "piso29",
+    "business_activity": null,
+    "status": "provided",
+    "source": "woocommerce_order_fields_and_meta"
+  },
+  "billing_address": {
+    "first_name": "angelo",
+    "last_name": "caro",
+    "company": "piso29",
+    "address_1": "cam 123 prueba",
+    "address_2": "",
+    "city": "",
+    "state": "CL_114",
+    "region": "Metropolitana de Santiago",
+    "comuna": "",
+    "postcode": "",
+    "country": "CL",
+    "phone": "+56951306275",
+    "email": "angelo@piso29.cl"
+  },
+  "shipping_address": {
+    "first_name": "",
+    "last_name": "",
+    "company": "",
+    "address_1": "",
+    "address_2": "",
+    "city": "",
+    "state": "",
+    "region": null,
+    "comuna": "",
+    "postcode": "",
+    "country": "",
+    "phone": null,
+    "email": null
+  },
+  "products": [
+    {
+      "item_id": 1,
+      "product_id": 5473,
+      "variation_id": 0,
+      "sku": "ML000845",
+      "name": "Taza Vaso Precipitado - 100mL (Set 4 unidades)",
+      "quantity": 1,
+      "unit_price": 8394.958,
+      "subtotal": 8394.957983,
+      "discount": 0,
+      "total_before_tax": 8394.957983,
+      "tax": 1595,
+      "total_including_tax": 9989.957983,
+      "tax_class": ""
+    },
+    {
+      "item_id": 2,
+      "product_id": 4554,
+      "variation_id": 0,
+      "sku": "ML000847",
+      "name": "Taza Vaso Precipitado - 300 mL",
+      "quantity": 1,
+      "unit_price": 3780.6723,
+      "subtotal": 3780.672269,
+      "discount": 0,
+      "total_before_tax": 3780.672269,
+      "tax": 718,
+      "total_including_tax": 4498.672269000001,
+      "tax_class": ""
+    }
+  ],
+  "coupons": [],
+  "fees": [],
+  "totals": {
+    "currency": "CLP",
+    "subtotal": 12176,
+    "discount_total": 0,
+    "discount_tax": 0,
+    "shipping_total": 0,
+    "shipping_tax": 0,
+    "cart_tax": 2313,
+    "total_tax": 2313,
+    "total": 14489
+  },
+  "shipping": {
+    "total": 0,
+    "tax": 0,
+    "courier": null,
+    "courier_code": null,
+    "lines": []
+  },
+  "payment": {
+    "method": "bacs",
+    "method_title": "Transferencia bancaria directa",
+    "transaction_id": null,
+    "paid": false
+  },
+  "integration": {
+    "courier": null,
+    "courier_code": null,
+    "quote_mode": false
+  }
+}

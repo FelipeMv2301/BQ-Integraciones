@@ -1,0 +1,67 @@
+// leyenda: fijo · opcional · woo:<campo> · interno (calculado/resuelto, no copia directa de Woo)
+// boleta = mismo payload, solo cambia U_IX_Ind ("39") y DocumentSubType ("bod_Bill")
+{
+  "U_IX_Ind": "33",                  // interno: woo billing.document_type / meta doc_type, mapeado a 33/39
+  "CardCode": "CN11111111-1",        // interno: SAPCustomer ya resuelto
+  "CntctCode": "CONTACTO",           // interno
+  "ShipToCode": "DESPACHO",          // interno
+  "PayToCode": "FISCAL",             // interno
+  "DocDate": "2026-08-25",           // interno: derivado de woo date_paid_gmt (hora Chile)
+  "TaxDate": "2026-08-25",           // interno: idéntico a DocDate a propósito (R1)
+  "DocDueDate": "2026-08-25",        // interno: idéntico a DocDate a propósito (R1)
+  "PaymentGroupCode": -1,            // fijo
+  "DocTotal": 20850,                 // interno: suma de las líneas del chunk (incluye envío)
+  "SalesPersonCode": "25",           // fijo
+  "U_BQ_AREA": "TRA",                // fijo
+  "U_VentaWeb": "Y",                 // fijo
+  "U_TipoVenta": "WEB",              // fijo
+  "U_WedDocNum": 25123,              // woo: number (número de pedido, no el id)
+  "Comments": "Pedido web 25123",            // interno: "Pedido web {reference}"
+  "U_NX_Observacion": "Pedido web 25123",    // interno: idem
+  "U_BQ_CodVoucher": "009626",       // opcional, woo: pay_authorization_code / transaction_id
+  "U_IXP_EXCLUDED": "N",             // fijo
+  "U_Traspaso_FE": "N",              // fijo
+  "U_IndTraslado": "1",              // fijo
+  "U_TipoDesp": "2",                 // fijo
+  "DocumentSubType": "bod_None",     // interno: derivado de U_IX_Ind (33->bod_None, resto->bod_Bill)
+
+  "DocumentLines": [
+    {
+      "ItemCode": "ML000845",        // interno: Stock-Service <- woo line_items[].sku
+      "Quantity": 1,                 // woo: line_items[].quantity
+      "UnitPrice": 10000,            // woo: line_items[].price (redondeo hacia arriba)
+      "DiscountPercent": 0,          // fijo — discount_total de woo nunca se usa
+      "LineTotal": 10000,            // woo: line_items[].total (truncado)
+      "WarehouseCode": "01",         // interno: Stock-Service
+      "CostingCode": "CG3060",       // fijo
+      "CostingCode2": "CC1000",      // fijo
+      "VatGroup": "IVA",             // fijo
+      "TaxCode": "IVA"               // fijo
+    },
+    {
+      "ItemCode": "ML000847",
+      "Quantity": 1,
+      "UnitPrice": 5000,
+      "DiscountPercent": 0,
+      "LineTotal": 5000,
+      "WarehouseCode": "01",
+      "CostingCode": "CG3060",
+      "CostingCode2": "CC1000",
+      "VatGroup": "IVA",
+      "TaxCode": "IVA"
+    },
+    {
+      "ItemCode": "SGchistn",         // interno: delivery_methods.sap_sku <- woo delivery_method_code — Chibra Terrestre (courier específico, aún no mapeado en delivery_methods; hoy siempre sale SG000096 genérico)
+      "Quantity": 1,                  // fijo, siempre 1
+      "UnitPrice": 2521,              // interno: neto del woo shipping_total bruto (3000), IVA descontado
+      "DiscountPercent": 0,           // fijo
+      "LineTotal": 2521,              // interno: idem UnitPrice
+      "WarehouseCode": "01",          // fijo, siempre "01" para el ítem de envío
+      "CostingCode": "CG3060",        // fijo
+      "CostingCode2": "CC1000",       // fijo
+      "VatGroup": "IVA",              // fijo
+      "TaxCode": "IVA"                // fijo
+    }
+    // esta línea no es un line_item real de woo — se arma aparte a partir de shipping_total + delivery_method_code
+  ]
+}

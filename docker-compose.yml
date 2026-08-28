@@ -1,0 +1,66 @@
+# Pensado para correr en el servidor on-prem (152.230.53.151 / LAN 192.168.0.165),
+# el mismo que ya aloja Postgres (nativo) y el contenedor bq-redis. Por eso este
+# compose NO define servicios de "db"/"redis" — ya existen ahí, fuera de este
+# archivo. Solo los 3 procesos propios de la app.
+#
+# host.docker.internal (via extra_hosts/host-gateway) resuelve a ESTE MISMO
+# servidor cuando el compose corre acá — es donde vive Postgres/Redis. Si algún
+# día se prueba este mismo archivo desde una máquina Windows/Mac distinta, el
+# .env de esa máquina necesita la IP LAN directa en vez de host.docker.internal
+# (Docker Desktop no resuelve ese hostname hacia OTRA máquina de la red).
+#
+# MIGRACIONES: correr SIEMPRE antes de "up -d" en cada deploy, como paso
+# manual y aparte — nunca automático al arrancar un contenedor (con más de
+# una réplica de "api" correrían la migración a la vez y podrían pisarse):
+#
+#   docker compose run --rm api uv run alembic upgrade head
+#
+# Antes de generar una migración nueva (alembic revision --autogenerate),
+# revisar el archivo resultante: SQLModel a veces no agrega el
+# "import sqlmodel" que su propio tipo de columna necesita — sin eso,
+# "alembic upgrade head" falla con NameError.
+
+services:
+
+  api:
+    build: .
+    container_name: bq-integraciones-api
+    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8020:8000"
+    env_file: .env
+    environment:
+      - TZ=America/Santiago
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build: .
+    container_name: bq-integraciones-worker
+    command: uv run celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+    env_file: .env
+    environment:
+      - TZ=America/Santiago
+      - CELERY_WORKER=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  beat:
+    build: .
+    container_name: bq-integraciones-beat
+    command: uv run celery -A app.tasks.celery_app beat --loglevel=info
+    env_file: .env
+    environment:
+      - TZ=America/Santiago
+      - CELERY_WORKER=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

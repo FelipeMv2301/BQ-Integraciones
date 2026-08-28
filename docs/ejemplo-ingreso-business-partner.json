@@ -1,0 +1,54 @@
+{
+  "CardCode": "CN11111111-1",
+  "CardName": "Empresa Ejemplo Limitada",
+  "FederalTaxID": "11111111-1",
+  "U_NX_GIRO": "Venta al por menor de productos de laboratorio",
+  "Phone1": "+56912345678",
+  "EmailAddress": "contacto@empresaejemplo.cl",
+  "CardType": "C",
+  "GroupCode": "100",
+  "SalesPersonCode": "25",
+  "DebitorAccount": "1140101",
+  "ContactPerson": "Juan Pérez",
+  "U_ActEconomica": "AE3",
+  "BPAddresses": [
+    {
+      "BPCode": "CN11111111-1",
+      "AddressType": "bo_BillTo",
+      "AddressName": "FISCAL",
+      "AddressName2": "WEB",
+      "RowNum": 0,
+      "Street": "Av. Siempre Viva 123",
+      "County": "Providencia",
+      "City": "Providencia",
+      "State": "Metropolitana de Santiago",
+      "Country": "CL",
+      "TaxCode": "IVA"
+    },
+    {
+      "BPCode": "CN11111111-1",
+      "AddressType": "bo_ShipTo",
+      "AddressName": "DESPACHO",
+      "AddressName2": "WEB",
+      "RowNum": 1,
+      "Street": "Av. Siempre Viva 123",
+      "County": "Providencia",
+      "City": "Providencia",
+      "State": "Metropolitana de Santiago",
+      "Country": "CL",
+      "TaxCode": "IVA"
+    }
+  ],
+  "ContactEmployees": [
+    {
+      "InternalCode": 0,
+      "CardCode": "CN11111111-1",
+      "Name": "Juan Pérez",
+      "Remarks1": "WEB",
+      "FirstName": "Juan",
+      "LastName": "Pérez",
+      "MobilePhone": "+56912345678",
+      "E_Mail": "contacto@empresaejemplo.cl"
+    }
+  ]
+}
