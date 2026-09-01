@@ -270,6 +270,78 @@ async def test_un_chunk_falla_sigue_con_los_demas(session, monkeypatch):
     assert resultado["facturas"][1]["doc_entry"] == 999
 
 
+# ── sync_invoice_to_email (manual, folio -> PDF -> email) ────────────────
+
+def _mock_email_ok(monkeypatch):
+    async def _fetch_pdf(s, f):
+        f.status = "COMPLETED"
+        await s.commit()
+    async def _prepare_email(s, f):
+        email = Email(sap_invoice_id=f.id, event_type=EmailEventType.CUSTOMER_INVOICE.value, status="PENDING")
+        s.add(email)
+        await s.commit()
+        return email
+    async def _send_email(s, e):
+        e.status = "COMPLETED"
+        await s.commit()
+
+    monkeypatch.setattr(orchestrator.documents, "fetch_pdf", _fetch_pdf)
+    monkeypatch.setattr(orchestrator.notifications, "prepare_email", _prepare_email)
+    monkeypatch.setattr(orchestrator.notifications, "send_email", _send_email)
+
+
+async def test_invoice_ya_existe_no_consulta_folio_a_sap(session, monkeypatch):
+    await _armar_sap_invoice(session, doc_entry=999, status="PENDING")
+    _mock_email_ok(monkeypatch)
+    monkeypatch.setattr(
+        orchestrator.invoices, "_consultar_folio",
+        lambda doc_entry: (_ for _ in ()).throw(AssertionError("no debería consultar SAP")),
+    )
+
+    resultado = await orchestrator.sync_invoice_to_email(session, 999)
+
+    assert resultado["error"] is None
+    assert resultado["status"] == "COMPLETED"
+
+
+async def test_invoice_sin_sap_billing_devuelve_error_sin_seguir(session, monkeypatch):
+    resultado = await orchestrator.sync_invoice_to_email(session, 12345)
+
+    assert "No hay SAPBilling" in resultado["error"]
+
+
+async def test_invoice_sin_folio_todavia_devuelve_error_claro(session, monkeypatch):
+    orden = await _armar_woo_order(session)
+    factura_billing = await _armar_sap_billing(session, orden, status="COMPLETED")
+    factura_billing.doc_entry = 500
+    await session.commit()
+    monkeypatch.setattr(orchestrator.invoices, "_consultar_folio", lambda doc_entry: None)
+
+    resultado = await orchestrator.sync_invoice_to_email(session, 500)
+
+    assert "todavía no le asignó folio" in resultado["error"]
+
+
+async def test_invoice_con_folio_nuevo_crea_sap_invoice_y_sigue(session, monkeypatch):
+    orden = await _armar_woo_order(session)
+    factura_billing = await _armar_sap_billing(session, orden, status="COMPLETED")
+    factura_billing.doc_entry = 500
+    await session.commit()
+    _mock_email_ok(monkeypatch)
+    monkeypatch.setattr(
+        orchestrator.invoices, "_consultar_folio",
+        lambda doc_entry: {"DocEntry": 500, "DocNum": 42, "FolioNumber": 7412, "FolioPrefixString": "E"},
+    )
+    async def _buscar_cliente(s, tax_id):
+        return None
+    monkeypatch.setattr(orchestrator.invoices, "_buscar_cliente", _buscar_cliente)
+
+    resultado = await orchestrator.sync_invoice_to_email(session, 500)
+
+    assert resultado["error"] is None
+    assert resultado["status"] == "COMPLETED"
+
+
 # ── procesar_pedidos_pendientes (automático, Beat) ──────────────────────
 
 async def test_batch_procesa_pending_y_failed_pero_no_completed(session, monkeypatch):

@@ -425,6 +425,15 @@ en vivo: `notify_failure()` real devolvió `True`, correo real enviado a felipe.
   (`tests/test_main.py`, con `TestClient` real — el middleware solo se dispara en el ciclo HTTP, no
   llamando a las funciones de ruta directo como el resto de los tests). 212/212 tests, `ruff check .`
   limpio. `docs/API.md` actualizado.
+- [x] **`POST /pipeline/sync-invoice/{doc_entry}`** (2026-09-01, no ticketeado) — faltaba el
+  equivalente de `sync-order` para la otra punta del pipeline: hasta hoy Facele/Brevo solo se
+  podían probar vía Chain B automática o `/retry` sobre una fila ya existente, sin forma de
+  disparar folio→PDF→correo para un `doc_entry` puntual desde cero.
+  `orchestrator.py::sync_invoice_to_email()` + `_obtener_o_confirmar_sap_invoice()`: si la
+  `SAPInvoice` ya existe la reutiliza; si no, confirma contra SAP que ya tenga folio asignado
+  (mismo criterio que `poll_sap_invoices`, "esperar" no es error) antes de crearla, y sigue con
+  `_procesar_factura()` (ya existente, reusado tal cual). 4 tests nuevos, 217/217 tests, `ruff
+  check .` limpio. `docs/API.md` actualizado.
 - [ ] BQI-65 — `RUNBOOK.md`
 - [x] Chain B automática (folio → PDF → email) — `task_poll_sap_invoices` conecta
   `procesar_facturas_pendientes` (`app/tasks/scheduled.py::_ciclo_sap_invoices`), mismo patrón que

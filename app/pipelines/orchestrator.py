@@ -4,7 +4,8 @@ Orquestador de pedidos hasta SAP y de facturas hasta el correo. Dos chains:
 - Chain A (pedido -> SAP): sync_order_to_sap(session, code) manual (endpoint
   /pipeline/sync-order), procesar_pedidos_pendientes(session) automático
   (Beat, task_poll_woo_orders).
-- Chain B (folio -> PDF -> email): procesar_facturas_pendientes(session),
+- Chain B (folio -> PDF -> email): sync_invoice_to_email(session, doc_entry)
+  manual (endpoint /pipeline/sync-invoice), procesar_facturas_pendientes(session)
   automático (Beat, task_poll_sap_invoices).
 
 Ambas componen pipelines ya probados sueltos. Reintentan FAILED además de
@@ -24,7 +25,7 @@ from app.models.sap_billing import SAPBilling
 from app.models.sap_customer import SAPCustomer
 from app.models.sap_invoice import SAPInvoice
 from app.models.woo_order import WooOrder
-from app.pipelines import billing, customers, documents, failure_tracking, notifications
+from app.pipelines import billing, customers, documents, failure_tracking, invoices, notifications
 from app.pipelines.woo_orders import _pedido_a_woo_order, _pedido_biocommerce_a_woo_order
 from app.services.biocommerce import orders as biocommerce_api
 from app.services.woocommerce import orders as woo_orders_api
@@ -246,6 +247,56 @@ async def _procesar_factura(session: AsyncSession, factura: SAPInvoice) -> dict:
             )
 
     return resultado
+
+
+async def _obtener_o_confirmar_sap_invoice(session: AsyncSession, doc_entry: int) -> SAPInvoice:
+    """
+    Para /pipeline/sync-invoice/{doc_entry}: si ya existe la SAPInvoice, la
+    reutiliza. Si no, confirma contra SAP que ya tenga folio asignado (R3 —
+    no hay evento que lo avise, hay que consultar) y recién ahí la crea,
+    mismo criterio que poll_sap_invoices().
+    """
+    existente = (
+        await session.execute(select(SAPInvoice).where(SAPInvoice.doc_entry == doc_entry))
+    ).scalar_one_or_none()
+    if existente:
+        return existente
+
+    factura_billing = (
+        await session.execute(select(SAPBilling).where(SAPBilling.doc_entry == doc_entry))
+    ).scalar_one_or_none()
+    if factura_billing is None:
+        raise ValueError(f"No hay SAPBilling con doc_entry={doc_entry}")
+
+    datos = invoices._consultar_folio(doc_entry)
+    if datos is None:
+        raise ValueError(f"SAP todavía no le asignó folio a doc_entry={doc_entry} — esperar y reintentar")
+
+    woo_order = await session.get(WooOrder, factura_billing.woo_order_id)
+    cliente = await invoices._buscar_cliente(session, woo_order.customer_tax_id if woo_order else None)
+
+    sap_invoice = SAPInvoice(
+        sap_billing_id=factura_billing.id,
+        doc_entry=datos["DocEntry"],
+        doc_num=datos["DocNum"],
+        folio=datos["FolioNumber"],
+        folio_prefix=datos.get("FolioPrefixString"),
+        doc_type_code=factura_billing.doc_type_code,
+        customer_email=cliente.email if cliente else None,
+        contact_email=cliente.contact_email if cliente else None,
+    )
+    session.add(sap_invoice)
+    await session.commit()
+    return sap_invoice
+
+
+async def sync_invoice_to_email(session: AsyncSession, doc_entry: int) -> dict:
+    """Endpoint manual (/pipeline/sync-invoice/{doc_entry}) — UNA factura puntual, folio -> PDF -> email."""
+    try:
+        factura = await _obtener_o_confirmar_sap_invoice(session, doc_entry)
+    except Exception as exc:
+        return {"doc_entry": doc_entry, "sap_invoice_id": None, "status": None, "error": str(exc)}
+    return await _procesar_factura(session, factura)
 
 
 async def procesar_facturas_pendientes(session: AsyncSession) -> dict:

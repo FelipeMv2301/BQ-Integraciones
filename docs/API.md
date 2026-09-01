@@ -176,6 +176,42 @@ correcto, no factura pedidos sin pagar de verdad.
 
 ---
 
+## `POST /pipeline/sync-invoice/{doc_entry}`
+
+Equivalente a los dos anteriores, pero para la otra punta del pipeline: **folio → PDF (Facele)
+→ correo (Brevo)**, para UNA factura puntual. No tiene endpoint de "solo Facele" o "solo
+Brevo" sueltos — este es el que las cubre a ambas, de punta a punta, en un solo llamado.
+
+**`doc_entry`** — el `DocEntry` de la factura en SAP (el mismo que devuelve `sync-order` al
+crearla).
+
+**Qué hace, en orden:**
+1. Si ya existe la fila en `sap_invoices` para ese `doc_entry`, la reutiliza tal cual.
+2. Si no, busca el `SAPBilling` con ese `doc_entry` y le consulta a SAP si ya le asignó folio
+   (`FolioNumber ne null`) — si SAP todavía no lo asignó, no es un error, es "esperar":
+   responde con `error` explicándolo, para reintentar más tarde.
+3. Con folio confirmado, crea la fila en `sap_invoices` (mismo criterio que `poll_sap_invoices`,
+   la espera automática de Beat).
+4. `fetch_pdf()` (Facele/Docele) si el PDF no está listo todavía.
+5. `prepare_email()` + `send_email()` (Brevo) si el correo no se mandó todavía.
+
+**Respuesta (200) — camino feliz:**
+```json
+{"sap_invoice_id": 3, "status": "COMPLETED", "error": null}
+```
+
+**Respuesta — SAP todavía no asignó folio:**
+```json
+{"doc_entry": 103970, "sap_invoice_id": null, "status": null, "error": "SAP todavía no le asignó folio a doc_entry=103970 — esperar y reintentar"}
+```
+
+**Respuesta — no existe ese `doc_entry` en `sap_billings`:**
+```json
+{"doc_entry": 999999, "sap_invoice_id": null, "status": null, "error": "No hay SAPBilling con doc_entry=999999"}
+```
+
+---
+
 ## `GET /pipeline/status` · `POST /pipeline/enable` · `POST /pipeline/disable`
 
 Interruptor del procesamiento automático (Beat) — vive en Redis (`pipeline:enabled`), no en
