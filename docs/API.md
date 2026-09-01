@@ -2,21 +2,30 @@
 
 Referencia de los endpoints disponibles hoy. Se actualiza a medida que se agregan nuevos.
 
-**Autenticación:** header `X-API-Key`, requerido en todos los endpoints excepto `/health`. Si
-`API_KEY` no está seteada en el `.env` del ambiente, la verificación se omite (desarrollo local
-sin key configurada) — no confundir con "protegido".
+**Autenticación:** header `X-API-Key`, **exigido de verdad** en todos los endpoints excepto
+`/health`, `/docs`, `/redoc` y `/openapi.json`. Si `API_KEY` no está seteada en el `.env` del
+ambiente, la verificación se omite (desarrollo local sin key configurada) — no confundir con
+"protegido".
 
-**Swagger/OpenAPI:** `GET /docs` (interfaz interactiva, probar endpoints desde el navegador)
-y `GET /openapi.json` (spec cruda) — vienen gratis de FastAPI, sin configuración extra.
+```
+curl -H "X-API-Key: <valor>" https://bq-integraciones-dev.bioquimica.cl/status
+```
 
-**Base local (dev):** `http://localhost:8000` (uvicorn directo) o `http://localhost:8020`
-(docker-compose, mapea 8020→8000).
+**Swagger/OpenAPI:** `GET /docs` (interfaz interactiva) y `GET /openapi.json` (spec cruda) —
+gratis de FastAPI, sin key. Ojo: ninguna ruta declara `response_model` de Pydantic, así que
+Swagger muestra el tipo de respuesta genérico ("object"/"array"), no los campos reales — para
+eso está este documento, con ejemplos reales de cada respuesta.
+
+**Bases:**
+- Local (dev, sin docker): `http://localhost:8000`
+- Local (docker-compose): `http://localhost:8020` (mapea a 8020→8000)
+- Pública (ambiente `desarrollo`): `https://bq-integraciones-dev.bioquimica.cl`
 
 ---
 
 ## `GET /health`
 
-Liveness puro — no toca la base de datos. Es lo que usa el `healthcheck` de
+Liveness puro — no toca la base de datos, no pide API Key. Es lo que usa el `healthcheck` de
 `docker-compose.yml` cada 30s para decidir si reinicia el contenedor `api`.
 
 **Respuesta:**
@@ -49,9 +58,10 @@ Solo aparecen las 5 tablas con `SyncStatusMixin` (tienen columna `status`) — l
 
 ## `GET /failures`
 
-Lista el historial de reintentos agotados (tabla `failures`, BQI-61) — cada fila es un
-evento de "esto se dio por vencido", no un estado actual. Ordenado del más reciente al
-más viejo.
+Lista el historial de reintentos agotados (tabla `failures`) — cada fila es un evento de
+"esto se dio por vencido tras N intentos", no un estado actual. Ordenado del más reciente al
+más viejo. Se llena sola cuando `procesar_pedidos_pendientes`/`procesar_facturas_pendientes`
+(Beat) o `/retry` agotan `*_MAX_ATTEMPTS` (ver `app/pipelines/failure_tracking.py`).
 
 **Respuesta:**
 ```json
@@ -68,16 +78,13 @@ más viejo.
   }
 ]
 ```
-Hoy la tabla está vacía en la práctica — nada la puebla todavía (ninguna fase agota
-reintentos automáticamente sin el orquestador conectado). Existe y funciona, a la espera.
 
 ---
 
 ## `POST /retry/{tabla}/{entity_id}`
 
 Reintenta **una sola fase** sobre una fila que ya existe, llamando **directo y síncrono**
-a la función de pipeline correspondiente (no encola nada — ver nota de diseño abajo).
-Responde con el resultado inmediato, no hay que consultar después.
+a la función de pipeline correspondiente (no encola nada, responde con el resultado inmediato).
 
 **`tabla`** — una de: `woo_orders` · `sap_customers` · `sap_billings` · `sap_invoices` · `emails`
 
@@ -94,7 +101,8 @@ Responde con el resultado inmediato, no hay que consultar después.
 {"tabla": "sap_billings", "id": 42, "status": "COMPLETED", "status_message": null}
 ```
 Si la fase falla, igual responde 200 con `status: "FAILED"` y el `status_message` explicando
-por qué — nunca un 500 opaco (la función de pipeline ya deja el motivo grabado antes de fallar).
+por qué — nunca un 500 opaco. Si agota `*_MAX_ATTEMPTS` en este mismo intento, escala a
+`EXHAUSTED` y queda una fila nueva en `/failures`.
 
 **Errores:**
 - `404` — tabla desconocida, o `entity_id` no existe en esa tabla.
@@ -102,28 +110,21 @@ por qué — nunca un 500 opaco (la función de pipeline ya deja el motivo graba
 - `422` — falta un dato necesario para reintentar (ej. `sap_customers`/`sap_billings` sin un
   `WooOrder` asociado del que sacar los datos).
 
-**Nota de diseño:** esto llama directo a la función Python, no pasa por Celery — las fases
-3/5/6/7 todavía no tienen tarea propia (el orquestador real no está conectado). Cuando se
-conecte, este endpoint puede seguir existiendo igual para reintentos manuales puntuales.
-
 ---
 
 ## `POST /pipeline/sync-order/{code}`
 
-Sincroniza **un pedido puntual** de WooCommerce hasta SAP, de punta a punta, para pruebas
-dirigidas — no reemplaza el polling automático (que todavía no está conectado).
+Sincroniza **un pedido puntual del sitio actual** (bioquimica.cl) hasta SAP, de punta a punta,
+para pruebas dirigidas — no reemplaza el polling automático de Beat.
 
-**`code`** — el **ID interno** de WooCommerce del pedido (`id` en la API de Woo, no el
-número de pedido visible al cliente — ver nota abajo).
+**`code`** — el **ID interno** de WooCommerce del pedido (`id` en la API de Woo, **no** el
+número de pedido visible al cliente, ej. `#24683` es `number`, no `id`).
 
 **Qué hace, en orden:**
-1. Si el pedido no está en `woo_orders` todavía, lo trae de WooCommerce por ID puntual (no
-   el polling de todos los `processing`).
+1. Si el pedido no está en `woo_orders` todavía, lo trae de WooCommerce por ID puntual.
 2. `resolve_customer()` — crea/actualiza el cliente en SAP.
 3. `prepare_billing()` — trocea en uno o más `SAPBilling` (lotes de 21 ítems).
-4. `create_sap_invoice()` por cada chunk — con **auto-carga de tasa de cambio** si SAP no
-   la tiene para la fecha exacta del pedido (`asegurar_tasa_cambio`, trae el valor real de
-   mindicador.cl y lo carga en SAP solo, sin intervención manual).
+4. `create_sap_invoice()` por cada chunk — con auto-carga de tasa de cambio si hace falta.
 
 **Respuesta (200) — camino feliz:**
 ```json
@@ -154,26 +155,35 @@ número de pedido visible al cliente — ver nota abajo).
   "error": null
 }
 ```
-Nunca devuelve un 500 sin manejar — cualquier falla queda descrita en `error` (a nivel
-pedido) o dentro de la `factura` puntual que falló.
+Nunca devuelve un 500 sin manejar — cualquier falla queda descrita en `error` o dentro de la
+`factura` puntual que falló.
 
-**Nota — `code` vs número de pedido visible:** WooCommerce tiene dos identificadores
-distintos para un mismo pedido: `id` (interno, el que usa este endpoint, comparte
-secuencia con todos los posts de WordPress) y `number` (el que ve el cliente/admin, ej.
-`#24683`). Si tenés el número visible y no el ID interno, se puede consultar en
-WooCommerce admin o en la tabla `woo_orders` (columna `reference`).
+---
+
+## `POST /pipeline/sync-order-biocommerce/{code}`
+
+Igual que el anterior, pero para el **sitio nuevo** (bioquimica.devwebs.cl), leyendo el pedido
+vía **BioCommerce PRO** (`GET /wp-json/bio-commerce/v1/orders/{code}/payload`) en vez de la API
+nativa de WooCommerce. Mismo `code` = ID interno del pedido (`order.id` del payload).
+
+Trae ya resueltos RUT, tipo de documento, giro y código de comuna — no hace falta escanear
+`meta_data` a mano como con el sitio actual. Mismos 4 pasos y misma forma de respuesta que
+`/pipeline/sync-order/{code}`.
+
+**Probado en vivo** contra SAP TEST con el pedido real `9232`: resuelve cliente bien
+(RUT + comuna), se frena en `prepare_billing` si el pedido no está pagado (`"sin paid_at"`) —
+correcto, no factura pedidos sin pagar de verdad.
 
 ---
 
 ## `GET /pipeline/status` · `POST /pipeline/enable` · `POST /pipeline/disable`
 
-Interruptor del procesamiento automático (Beat) — Redis (`pipeline:enabled`), no `.env`, para
-poder pausar/reanudar sin redeploy. **Por defecto apagado** (y si Redis no responde, se
-asume apagado — nunca "procesar a ciegas"). Cuando está apagado, `task_poll_woo_orders`/
-`task_poll_sap_invoices` devuelven `{"skipped": "disabled"}` sin tocar nada — pero Beat
-sigue vivo y el heartbeat de Healthchecks sigue pingeando igual (son cosas distintas).
-
-Estos 3 endpoints funcionan siempre, esté prendido o apagado — es el control manual.
+Interruptor del procesamiento automático (Beat) — vive en Redis (`pipeline:enabled`), no en
+`.env`, para poder pausar/reanudar sin redeploy. **Por defecto apagado**, y si Redis no
+responde se asume apagado (fail-closed — nunca "procesar a ciegas"). Cuando está apagado,
+`task_poll_woo_orders`/`task_poll_sap_invoices` devuelven `{"skipped": "disabled"}` sin tocar
+nada — pero Beat sigue vivo y el heartbeat de Healthchecks sigue pingeando igual (son cosas
+distintas). Estos 3 endpoints funcionan siempre, esté prendido o apagado.
 
 ```
 GET  /pipeline/status   -> {"enabled": false}
@@ -188,5 +198,5 @@ POST /pipeline/disable  -> {"enabled": false}
 | Variable | Efecto |
 |---|---|
 | `ENVIRONMENT=development` (default) | `send_email()` redirige el destinatario real a `ALERT_EMAILS` (vos) con `[PRUEBA]` en el asunto — ningún correo de prueba llega a un cliente real |
-| `ENVIRONMENT=production` | `send_email()` manda al destinatario real de la fila, tal cual |
-| `API_KEY` | declarada pero sin middleware que la use todavía (BQI-64 pendiente) |
+| `ENVIRONMENT=production` | `send_email()` manda al destinatario real de la fila, tal cual. Si además `API_KEY` está vacío, el proceso **ni arranca** (falla rápido en vez de exponer la API sin auth) |
+| `API_KEY` | header `X-API-Key` exigido en todos los endpoints salvo `/health`/`/docs`/`/redoc`/`/openapi.json`. Vacío = sin protección (dev local) |
