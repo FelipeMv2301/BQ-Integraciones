@@ -119,3 +119,144 @@ async def test_poll_woo_orders_marca_alerta_volumen_pero_no_aborta(session, monk
 
     assert resultado["alerta_volumen"] is True
     assert resultado["nuevos"] == 3  # se procesan igual, no se aborta
+
+
+# ── BioCommerce PRO (sitio nuevo, bioquimica.devwebs.cl) ────────────────
+
+def _payload_biocommerce(id_: int = 9232, number: str = "9232", tax_id: str = "19.720.592-K") -> dict:
+    return {
+        "order": {
+            "id": id_, "number": number, "status": "on-hold",
+            "created_at": "2026-08-31T18:01:28+00:00",
+        },
+        "tax_document": {
+            "type": "factura", "sii_code": 33, "tax_id": tax_id,
+            "business_name": "razon social prueba", "business_activity": "Alimentos",
+            "business_activity_code": "ALIM",
+        },
+        "billing_address": {
+            "first_name": "razon social prueba", "last_name": "", "company": "razon social prueba",
+            "address_1": "camino padre hurtado 6510", "address_2": "",
+            "state": "Metropolitana de Santiago", "comuna": "Buin", "comuna_code": "CL_114",
+            "phone": "+56951306275", "email": "angelo@piso29.cl",
+        },
+        "shipping_address": {
+            "first_name": "razon social prueba", "last_name": "",
+            "address_1": "camino padre hurtado 6510", "address_2": "",
+            "state": "Metropolitana de Santiago", "comuna": "Buin", "comuna_code": "CL_114",
+        },
+        "products": [
+            {"item_id": 4, "product_id": 9210, "sku": "RP0436B3", "quantity": 1,
+             "unit_price": 9446, "total_before_tax": 9446, "tax": 1795},
+        ],
+        "totals": {"currency": "CLP", "subtotal": 9446, "discount_total": 0, "shipping_total": 3990, "total": 15231},
+        "shipping": {"total": 3990, "courier": "Courier de ejemplo", "courier_code": "BIODEMO", "lines": []},
+        "payment": {"method": "bacs", "transaction_id": None, "paid": False, "paid_at": None},
+        "integration": {"courier_code": "BIODEMO"},
+    }
+
+
+def test_bc_extraer_paid_at_parsea_iso():
+    payload = _payload_biocommerce()
+    payload["payment"]["paid_at"] = "2026-08-31T20:00:00+00:00"
+    assert pipeline._bc_extraer_paid_at(payload) is not None
+
+
+def test_bc_extraer_paid_at_none_si_no_pagado():
+    assert pipeline._bc_extraer_paid_at(_payload_biocommerce()) is None
+
+
+def test_bc_extraer_pay_auth_code_toma_transaction_id():
+    payload = _payload_biocommerce()
+    payload["payment"]["transaction_id"] = "TXN789"
+    assert pipeline._bc_extraer_pay_auth_code(payload) == "TXN789"
+
+
+def test_bc_extraer_pay_auth_code_none_si_vacio():
+    assert pipeline._bc_extraer_pay_auth_code(_payload_biocommerce()) is None
+
+
+def test_bc_extraer_delivery_method_code_usa_courier_code_no_method_id():
+    assert pipeline._bc_extraer_delivery_method_code(_payload_biocommerce()) == "BIODEMO"
+
+
+def test_bc_extraer_doc_type_code_convierte_sii_code_a_string():
+    assert pipeline._bc_extraer_doc_type_code(_payload_biocommerce()) == "33"
+
+
+def test_bc_billing_address_usa_comuna_code_no_state_legible():
+    billing = pipeline._bc_billing_address(_payload_biocommerce())
+    assert billing["state"] == "CL_114"
+    assert billing["industry_id"] == "ALIM"
+    assert billing["business_activity"] == "Alimentos"
+    assert billing["company"] == "razon social prueba"
+
+
+def test_bc_shipping_address_usa_comuna_code():
+    shipping = pipeline._bc_shipping_address(_payload_biocommerce())
+    assert shipping["state"] == "CL_114"
+
+
+def test_bc_items_mapea_campos_del_producto():
+    items = pipeline._bc_items(_payload_biocommerce())
+    assert items == [
+        {"sku": "RP0436B3", "product_id": 9210, "quantity": 1, "price": 9446, "total": 9446, "total_tax": 1795},
+    ]
+
+
+def test_pedido_biocommerce_a_woo_order_mapea_todos_los_campos():
+    orden = pipeline._pedido_biocommerce_a_woo_order(_payload_biocommerce())
+    assert orden.code == 9232
+    assert orden.reference == 9232
+    assert orden.total == 15231
+    assert orden.shipping == 3990
+    assert orden.customer_tax_id == "19.720.592-K"
+    assert orden.bill_doc_type_code == "33"
+    assert orden.delivery_method_code == "BIODEMO"
+    assert orden.billing_address["state"] == "CL_114"
+    assert len(orden.items) == 1
+
+
+async def test_poll_biocommerce_orders_guarda_pedidos_nuevos(session, monkeypatch):
+    pedidos = [_payload_biocommerce(id_=1), _payload_biocommerce(id_=2)]
+    monkeypatch.setattr(
+        pipeline.biocommerce_api, "obtener_pedidos",
+        lambda date_from, date_to, status=None: pedidos,
+    )
+
+    resultado = await pipeline.poll_biocommerce_orders(session, "2026-08-01", "2026-09-01")
+
+    assert resultado == {"traidos": 2, "nuevos": 2, "alerta_volumen": False}
+    guardados = (await session.execute(select(WooOrder))).scalars().all()
+    assert len(guardados) == 2
+
+
+async def test_poll_biocommerce_orders_no_duplica_pedidos_ya_guardados(session, monkeypatch):
+    session.add(pipeline._pedido_biocommerce_a_woo_order(_payload_biocommerce(id_=1)))
+    await session.commit()
+
+    pedidos = [_payload_biocommerce(id_=1), _payload_biocommerce(id_=2)]
+    monkeypatch.setattr(
+        pipeline.biocommerce_api, "obtener_pedidos",
+        lambda date_from, date_to, status=None: pedidos,
+    )
+
+    resultado = await pipeline.poll_biocommerce_orders(session, "2026-08-01", "2026-09-01")
+
+    assert resultado == {"traidos": 2, "nuevos": 1, "alerta_volumen": False}
+    guardados = (await session.execute(select(WooOrder))).scalars().all()
+    assert len(guardados) == 2
+
+
+async def test_poll_biocommerce_orders_marca_alerta_volumen_pero_no_aborta(session, monkeypatch):
+    monkeypatch.setattr(pipeline.settings, "MAX_ORDERS_PER_CYCLE", 1)
+    pedidos = [_payload_biocommerce(id_=1), _payload_biocommerce(id_=2), _payload_biocommerce(id_=3)]
+    monkeypatch.setattr(
+        pipeline.biocommerce_api, "obtener_pedidos",
+        lambda date_from, date_to, status=None: pedidos,
+    )
+
+    resultado = await pipeline.poll_biocommerce_orders(session, "2026-08-01", "2026-09-01")
+
+    assert resultado["alerta_volumen"] is True
+    assert resultado["nuevos"] == 3

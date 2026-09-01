@@ -15,6 +15,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.config import settings
 from app.models.woo_order import WooOrder
+from app.services.biocommerce import orders as biocommerce_api
 from app.services.woocommerce import orders as woo_orders_api
 
 logger = logging.getLogger(__name__)
@@ -95,73 +96,151 @@ def _pedido_a_woo_order(pedido: dict) -> WooOrder:
     )
 
 
-# ── Sitio nuevo (bioquimica.devwebs.cl) — transicional ──────────────────
+# ── Sitio nuevo (bioquimica.devwebs.cl) — vía BioCommerce PRO ───────────
 #
-# Mismo pedido "crudo" de WooCommerce, pero tax_id/document_type/industria/
-# giro se movieron de `billing.*` a `meta_data` (confirmado 2026-08-21
-# comparando la API nativa del sitio nuevo contra el sitio actual). El resto
-# del payload (total, ítems, envío, direcciones) es idéntico — se reutilizan
-# las mismas funciones de extracción de arriba.
-#
-# _DOC_TYPE_MAP: el sitio nuevo manda el código interno de documento
-# ("BE"/"FE", heredado de Integrify) en vez del código SII directo que
-# mandaba el sitio actual ("33"/"39"). Confirmado con Angelo (BioCommerce,
-# 2026-08-21): Factura=33, Boleta=39 — faltan las variantes exentas si
-# llegan a usarse.
-_DOC_TYPE_MAP = {"FE": "33", "BE": "39"}
+# Payload ya normalizado por el plugin propio de Angelo (GET
+# /wp-json/bio-commerce/v1/orders/{id}/payload), confirmado funcionando
+# 2026-09-01. Reemplaza al adaptador transicional que leía meta_data a mano
+# sobre la API nativa de WooCommerce (rompía cada vez que el checkout cambiaba
+# de mecanismo, ver historial de este archivo) — acá el propio plugin ya
+# resuelve RUT, tipo de documento, giro y código de comuna.
 
 
-def _meta(pedido: dict, clave: str) -> str | None:
-    for entrada in pedido.get("meta_data") or []:
-        if entrada.get("key") == clave:
-            return entrada.get("value") or None
-    return None
+def _bc_extraer_paid_at(payload: dict) -> datetime | None:
+    valor = (payload.get("payment") or {}).get("paid_at")
+    if not valor:
+        return None
+    try:
+        return datetime.fromisoformat(valor)
+    except ValueError:
+        logger.warning("_pedido_biocommerce_a_woo_order: payment.paid_at con formato inesperado: %r", valor)
+        return None
 
 
-def _extraer_tax_id_nuevo(pedido: dict) -> str | None:
-    return _meta(pedido, "_billing_tax_id") or _meta(pedido, "billing_tax_id")
+def _bc_extraer_pay_auth_code(payload: dict) -> str | None:
+    valor = (payload.get("payment") or {}).get("transaction_id")
+    return str(valor).strip() or None if valor else None
 
 
-def _extraer_doc_type_code_nuevo(pedido: dict) -> str | None:
-    crudo = _meta(pedido, "_billing_doc_type") or _meta(pedido, "billing_doc_type")
-    return _DOC_TYPE_MAP.get(crudo, crudo)
-
-
-def _extraer_industry_nuevo(pedido: dict) -> str | None:
-    return _meta(pedido, "_billing_industry") or _meta(pedido, "billing_industry")
-
-
-def _extraer_business_activity_nuevo(pedido: dict) -> str | None:
-    return _meta(pedido, "_billing_business_activity") or _meta(pedido, "billing_business_activity")
-
-
-def _pedido_nuevo_a_woo_order(pedido: dict) -> WooOrder:
+def _bc_extraer_delivery_method_code(payload: dict) -> str | None:
     """
-    Igual que _pedido_a_woo_order, pero para el sitio nuevo. `industry_id`/
-    `business_activity` se inyectan dentro de `billing_address` (en vez de
-    columnas propias) para que construir_datos_cliente() los siga leyendo
-    sin cambios — solución transicional mientras se define el contrato
-    definitivo con BioCommerce.
+    courier_code (ej. 'SGchistn'), no method_id — el sitio nuevo manda TODO
+    su despacho bajo un único method_id genérico ('bio_shipping_pro'); lo que
+    de verdad distingue el courier es courier_code, que además ya coincide
+    con el ItemCode real en SAP (confirmado contra SAP prod, ver
+    campos-payload-sap.md).
     """
-    billing = dict(_extraer_direccion(pedido, "billing"))
-    billing["industry_id"] = _extraer_industry_nuevo(pedido)
-    billing["business_activity"] = _extraer_business_activity_nuevo(pedido)
+    return (payload.get("shipping") or {}).get("courier_code") or None
+
+
+def _bc_extraer_doc_type_code(payload: dict) -> str | None:
+    codigo = (payload.get("tax_document") or {}).get("sii_code")
+    return str(codigo) if codigo is not None else None
+
+
+def _bc_billing_address(payload: dict) -> dict:
+    """
+    construir_datos_cliente() espera 'state' con el CÓDIGO de comuna (no el
+    nombre) — BioCommerce lo manda aparte como comuna_code, separado del
+    state/region legible para humanos.
+    """
+    tax_document = payload.get("tax_document") or {}
+    billing = payload.get("billing_address") or {}
+    return {
+        "company": tax_document.get("business_name") or billing.get("company") or "",
+        "first_name": billing.get("first_name") or "",
+        "last_name": billing.get("last_name") or "",
+        "phone": billing.get("phone") or "",
+        "email": billing.get("email") or "",
+        "address_1": billing.get("address_1") or "",
+        "address_2": billing.get("address_2") or "",
+        "state": billing.get("comuna_code"),
+        "business_activity": tax_document.get("business_activity"),
+        "industry_id": tax_document.get("business_activity_code"),
+    }
+
+
+def _bc_shipping_address(payload: dict) -> dict:
+    shipping = payload.get("shipping_address") or {}
+    return {
+        "first_name": shipping.get("first_name") or "",
+        "last_name": shipping.get("last_name") or "",
+        "address_1": shipping.get("address_1") or "",
+        "address_2": shipping.get("address_2") or "",
+        "state": shipping.get("comuna_code"),
+    }
+
+
+def _bc_items(payload: dict) -> list[dict]:
+    return [
+        {
+            "sku": producto.get("sku"),
+            "product_id": producto.get("product_id"),
+            "quantity": producto.get("quantity"),
+            "price": producto.get("unit_price"),
+            "total": producto.get("total_before_tax"),
+            "total_tax": producto.get("tax"),
+        }
+        for producto in payload.get("products") or []
+    ]
+
+
+def _pedido_biocommerce_a_woo_order(payload: dict) -> WooOrder:
+    """Adaptador para el payload normalizado de BioCommerce PRO."""
+    orden = payload["order"]
+    totals = payload["totals"]
 
     return WooOrder(
-        code=pedido["id"],
-        reference=_extraer_reference(pedido),
-        paid_at=_extraer_paid_at(pedido),
-        total=_extraer_total(pedido),
-        discount=_extraer_discount(pedido),
-        shipping=_extraer_shipping(pedido),
-        pay_auth_code=_extraer_pay_auth_code(pedido),
-        delivery_method_code=_extraer_metodo_entrega(pedido),
-        bill_doc_type_code=_extraer_doc_type_code_nuevo(pedido),
-        customer_tax_id=_extraer_tax_id_nuevo(pedido),
-        billing_address=billing,
-        shipping_address=_extraer_direccion(pedido, "shipping"),
-        items=_extraer_items(pedido),
+        code=orden["id"],
+        reference=int(orden["number"]),
+        paid_at=_bc_extraer_paid_at(payload),
+        total=int(totals["total"]),
+        discount=int(totals["discount_total"]),
+        shipping=int(totals["shipping_total"]),
+        pay_auth_code=_bc_extraer_pay_auth_code(payload),
+        delivery_method_code=_bc_extraer_delivery_method_code(payload),
+        bill_doc_type_code=_bc_extraer_doc_type_code(payload),
+        customer_tax_id=(payload.get("tax_document") or {}).get("tax_id"),
+        billing_address=_bc_billing_address(payload),
+        shipping_address=_bc_shipping_address(payload),
+        items=_bc_items(payload),
     )
+
+
+async def poll_biocommerce_orders(
+    session: AsyncSession, date_from: str, date_to: str, status: str | None = None,
+) -> dict:
+    """
+    Ingesta de pedidos del sitio nuevo vía BioCommerce PRO — equivalente a
+    poll_woo_orders() pero para bioquimica.devwebs.cl. Mismo criterio de
+    dedup por code y circuit breaker I3. NO está conectada a Beat todavía
+    a propósito — mismo .env (WOO_NUEVO_*) que usaría el desarrollo en
+    paralelo con el sitio viejo si se conectara sin querer en producción.
+    """
+    pedidos_crudos = biocommerce_api.obtener_pedidos(date_from=date_from, date_to=date_to, status=status)
+
+    codigos_existentes = set(
+        (await session.execute(select(WooOrder.code))).scalars().all()
+    )
+    pedidos_nuevos = [p for p in pedidos_crudos if p["order"]["id"] not in codigos_existentes]
+
+    alerta_volumen = len(pedidos_nuevos) > settings.MAX_ORDERS_PER_CYCLE
+    if alerta_volumen:
+        logger.warning(
+            "poll_biocommerce_orders (I3): %d pedidos nuevos supera MAX_ORDERS_PER_CYCLE=%d — "
+            "posible bug de polling/dedup, revisar; se procesan igual",
+            len(pedidos_nuevos), settings.MAX_ORDERS_PER_CYCLE,
+        )
+
+    for pedido in pedidos_nuevos:
+        session.add(_pedido_biocommerce_a_woo_order(pedido))
+
+    await session.commit()
+    logger.info(
+        "poll_biocommerce_orders: %d pedidos nuevos guardados (de %d traídos)",
+        len(pedidos_nuevos), len(pedidos_crudos),
+    )
+    return {"traidos": len(pedidos_crudos), "nuevos": len(pedidos_nuevos), "alerta_volumen": alerta_volumen}
 
 
 async def poll_woo_orders(session: AsyncSession, modified_after: str | None = None) -> dict:

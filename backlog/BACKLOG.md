@@ -387,6 +387,35 @@ en vivo: `notify_failure()` real devolvió `True`, correo real enviado a felipe.
   vivo: WooCommerce devolvió 3031 pedidos sin el filtro, **14 con el filtro**. Los ~3000 pedidos que
   quedaron mal ingeridos en esta base de prueba no se limpiaron — Felipe confirmó que no importa,
   es entorno de prueba, se limpia/recrea la base antes de producción (ver plan de corte más abajo).
+- [x] **Ingesta del sitio nuevo vía BioCommerce PRO** (2026-09-01, no ticketeado) — Angelo arregló el
+  `permission_callback` que daba 401 en `/wp-json/bio-commerce/v1/orders/{id}/payload` y agregó el
+  masivo paginado (`/orders/payload?date_from=&date_to=&page=&per_page=`), confirmado en vivo con 3
+  keys distintas antes del fix y 1 después. Payload normalizado trae ya resuelto lo que antes había
+  que inferir a mano: `tax_document.sii_code`/`tax_id`/`business_activity_code` y —el punto que
+  bloqueaba— `billing_address.comuna_code` (código de comuna real, ej. `CL_114`), separado del
+  `state`/`region` legibles para humanos.
+  - `app/services/biocommerce/{client,orders}.py` — nuevo. Mismas credenciales que el cliente nativo
+    del sitio nuevo (`WOO_NUEVO_KEY/SECRET`), solo cambia el endpoint. Paginación por
+    `page`/`per_page`/`pagination.total_pages` (no `$skip` como SAP).
+  - `app/pipelines/woo_orders.py` — `_pedido_biocommerce_a_woo_order()` + `poll_biocommerce_orders()`
+    reemplazan al adaptador transicional `_pedido_nuevo_a_woo_order()` (leía `meta_data` a mano sobre
+    la API nativa de WooCommerce, rompía cada vez que el checkout cambiaba de mecanismo — pasó 2 veces
+    en la misma semana). `poll_biocommerce_orders()` queda armada pero **sin conectar a Beat a
+    propósito** — conectarla sin un flag de ambiente correría el riesgo de que el `.env` de producción
+    (que hoy también tiene `WOO_NUEVO_*` seteado, leftover de pruebas) empiece a mezclar pedidos de
+    prueba del sitio nuevo con la ingesta real de producción.
+  - `app/pipelines/orchestrator.py` — `sync_order_to_sap_biocommerce()` +
+    `_obtener_o_crear_woo_order_biocommerce()`, en paralelo a `sync_order_to_sap()` (sitio actual), sin
+    tocarlo — mismo criterio de aislamiento que ya se usa entre `woocommerce`/`woocommerce_nuevo`.
+    Nuevo endpoint `POST /pipeline/sync-order-biocommerce/{code}`.
+  - Paquete `app/services/woocommerce_nuevo/` **eliminado** — completamente reemplazado, sin usos
+    restantes (confirmado por grep antes de borrar).
+  - 21 tests nuevos (`test_woo_orders.py`/`test_orchestrator.py`), 207/207 tests, `ruff check .`
+    limpio. **Probado en vivo contra SAP TEST real** con el pedido `9232`: `resolve_customer` ahora
+    resuelve bien (`CN19720592-K`, comuna Buin/`CL_114` matcheada contra el catálogo real) — se frena
+    después en `prepare_billing` con `"sin paid_at"`, correcto: ese pedido de prueba sigue sin pagar de
+    verdad, no es un bug. Falta un pedido de prueba pagado con producto real para ver la factura
+    completa de punta a punta.
 - [ ] BQI-64 — Middleware API Key
 - [ ] BQI-65 — `RUNBOOK.md`
 - [x] Chain B automática (folio → PDF → email) — `task_poll_sap_invoices` conecta

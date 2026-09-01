@@ -1,6 +1,7 @@
 """
 POST /pipeline/sync-order/{code} — sincroniza manualmente UN pedido puntual
-hasta SAP, para pruebas dirigidas.
+hasta SAP, para pruebas dirigidas. /sync-order-biocommerce/{code} es el
+equivalente para el sitio nuevo (bioquimica.devwebs.cl vía BioCommerce PRO).
 
 GET /pipeline/status, POST /pipeline/enable, POST /pipeline/disable —
 interruptor del procesamiento automático (Beat). Funcionan siempre, esté
@@ -12,7 +13,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core import pipeline_state
 from app.core.database import get_session
-from app.pipelines.orchestrator import sync_order_to_sap
+from app.pipelines.orchestrator import sync_order_to_sap, sync_order_to_sap_biocommerce
 
 router = APIRouter()
 
@@ -20,6 +21,11 @@ router = APIRouter()
 @router.post("/pipeline/sync-order/{code}")
 async def sync_order(code: int, session: AsyncSession = Depends(get_session)) -> dict:
     return await sync_order_to_sap(session, code)
+
+
+@router.post("/pipeline/sync-order-biocommerce/{code}")
+async def sync_order_biocommerce(code: int, session: AsyncSession = Depends(get_session)) -> dict:
+    return await sync_order_to_sap_biocommerce(session, code)
 
 
 @router.get("/pipeline/status")
