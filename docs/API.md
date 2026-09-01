@@ -2,8 +2,9 @@
 
 Referencia de los endpoints disponibles hoy. Se actualiza a medida que se agregan nuevos.
 
-**Sin autenticación todavía** (BQI-64 pendiente) — no exponer este puerto a internet sin
-resolver eso primero.
+**Autenticación:** header `X-API-Key`, requerido en todos los endpoints excepto `/health`. Si
+`API_KEY` no está seteada en el `.env` del ambiente, la verificación se omite (desarrollo local
+sin key configurada) — no confundir con "protegido".
 
 **Swagger/OpenAPI:** `GET /docs` (interfaz interactiva, probar endpoints desde el navegador)
 y `GET /openapi.json` (spec cruda) — vienen gratis de FastAPI, sin configuración extra.

@@ -416,7 +416,15 @@ en vivo: `notify_failure()` real devolvió `True`, correo real enviado a felipe.
     después en `prepare_billing` con `"sin paid_at"`, correcto: ese pedido de prueba sigue sin pagar de
     verdad, no es un bug. Falta un pedido de prueba pagado con producto real para ver la factura
     completa de punta a punta.
-- [ ] BQI-64 — Middleware API Key
+- [x] BQI-64 — Middleware API Key (2026-09-01) — `app/main.py`, portado del mismo patrón que
+  Stock-Service: `@app.middleware("http")` verifica `X-API-Key` contra `settings.API_KEY` en todos
+  los endpoints salvo `/health` (exento, es el liveness del healthcheck de Docker). Si `API_KEY` está
+  vacío, no exige nada (desarrollo local sin key). Guard adicional al arrancar: en producción
+  (`ENVIRONMENT=production`) con `API_KEY` vacío, el proceso ni levanta (`RuntimeError` — mejor que
+  quede sin arrancar a que quede una API administrativa expuesta sin auth). 5 tests nuevos
+  (`tests/test_main.py`, con `TestClient` real — el middleware solo se dispara en el ciclo HTTP, no
+  llamando a las funciones de ruta directo como el resto de los tests). 212/212 tests, `ruff check .`
+  limpio. `docs/API.md` actualizado.
 - [ ] BQI-65 — `RUNBOOK.md`
 - [x] Chain B automática (folio → PDF → email) — `task_poll_sap_invoices` conecta
   `procesar_facturas_pendientes` (`app/tasks/scheduled.py::_ciclo_sap_invoices`), mismo patrón que
