@@ -1,0 +1,28 @@
+name: Deploy desarrollo
+
+on:
+  push:
+    branches: [desarrollo]
+
+concurrency:
+  group: deploy-desarrollo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # clean:false a propósito -- el .env real vive sin trackear en el
+          # workdir del runner (nunca en el repo); un checkout limpio lo borraría.
+          clean: false
+
+      - name: Migraciones (alembic upgrade head)
+        run: docker compose run --rm api uv run alembic upgrade head
+
+      - name: Build + up
+        run: docker compose up -d --build
+
+      - name: Limpieza de imágenes viejas
+        run: docker image prune -f

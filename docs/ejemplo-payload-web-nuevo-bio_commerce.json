@@ -1,0 +1,311 @@
+{
+  "id": 5914,
+  "parent_id": 0,
+  "status": "on-hold",
+  "currency": "CLP",
+  "version": "11.0.0",
+  "prices_include_tax": true,
+  "date_created": "2026-08-20T17:53:34",
+  "date_modified": "2026-08-20T17:53:47",
+  "discount_total": "0",
+  "discount_tax": "0",
+  "shipping_total": "0",
+  "shipping_tax": "0",
+  "cart_tax": "2313",
+  "total": "14489",
+  "total_tax": "2313",
+  "customer_id": 1,
+  "order_key": "wc_order_fdm6Qyn8odsPw",
+  "billing": {
+    "first_name": "angelo",
+    "last_name": "caro",
+    "company": "piso29",
+    "address_1": "cam 123 prueba",
+    "address_2": "",
+    "city": "",
+    "state": "CL_114",
+    "postcode": "",
+    "country": "CL",
+    "email": "angelo@piso29.cl",
+    "phone": "+56951306275"
+  },
+  "shipping": {
+    "first_name": "",
+    "last_name": "",
+    "company": "",
+    "address_1": "",
+    "address_2": "",
+    "city": "",
+    "state": "",
+    "postcode": "",
+    "country": "",
+    "phone": ""
+  },
+  "payment_method": "bacs",
+  "payment_method_title": "Transferencia bancaria directa",
+  "transaction_id": "",
+  "customer_ip_address": "45.170.103.192",
+  "customer_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+  "created_via": "checkout",
+  "customer_note": "pedido de prueba",
+  "date_completed": null,
+  "date_paid": null,
+  "cart_hash": "848f150e5c077407c5e8e971fe75032a",
+  "number": "5914",
+  "meta_data": [
+    { "id": 1, "key": "_billing_doc_type", "value": "BE" },
+    { "id": 2, "key": "_billing_tax_id", "value": "11222333-2" },
+    { "id": 3, "key": "_billing_region", "value": "Metropolitana de Santiago" },
+    { "id": 4, "key": "_billing_business_activity", "value": "giro prueba" },
+    { "id": 5, "key": "_billing_industry", "value": "DIST" },
+    { "id": 6, "key": "is_vat_exempt", "value": "no" },
+    { "id": 9, "key": "billing_doc_type", "value": "BE" },
+    { "id": 10, "key": "billing_tax_id", "value": "11222333-2" },
+    { "id": 11, "key": "billing_company", "value": "piso29" },
+    { "id": 12, "key": "billing_business_activity", "value": "giro prueba" },
+    { "id": 13, "key": "billing_industry", "value": "DIST" },
+    { "id": 14, "key": "_wc_order_attribution_source_type", "value": "typein" },
+    { "id": 15, "key": "_wc_order_attribution_utm_source", "value": "(direct)" },
+    { "id": 16, "key": "_wc_order_attribution_session_entry", "value": "https://bioquimica.devwebs.cl/" },
+    { "id": 17, "key": "_wc_order_attribution_session_start_time", "value": "2026-08-20 15:51:24" },
+    { "id": 18, "key": "_wc_order_attribution_session_pages", "value": "27" },
+    { "id": 19, "key": "_wc_order_attribution_session_count", "value": "3" },
+    { "id": 20, "key": "_wc_order_attribution_user_agent", "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36" },
+    { "id": 21, "key": "_wc_order_attribution_device_type", "value": "Desktop" },
+    { "id": 25, "key": "_wc_push_notification_claimed", "value": "1787259227" },
+    { "id": 26, "key": "_wc_push_notification_sent", "value": "1787259227" }
+  ],
+  "line_items": [
+    {
+      "id": 1,
+      "name": "Taza Vaso Precipitado - 100mL (Set 4 unidades)",
+      "product_id": 0,
+      "variation_id": 0,
+      "quantity": 1,
+      "tax_class": "",
+      "subtotal": "8395",
+      "subtotal_tax": "1595",
+      "total": "8395",
+      "total_tax": "1595",
+      "taxes": [{ "id": 1, "total": "1595", "subtotal": "1595" }],
+      "meta_data": [
+        { "id": 25, "key": "_reduced_stock", "value": "1", "display_key": "_reduced_stock", "display_value": "1" }
+      ],
+      "sku": null,
+      "global_unique_id": null,
+      "price": 8394.957983,
+      "image": { "id": 0, "src": "" },
+      "parent_name": null
+    },
+    {
+      "id": 2,
+      "name": "Taza Vaso Precipitado - 300 mL",
+      "product_id": 0,
+      "variation_id": 0,
+      "quantity": 1,
+      "tax_class": "",
+      "subtotal": "3781",
+      "subtotal_tax": "718",
+      "total": "3781",
+      "total_tax": "718",
+      "taxes": [{ "id": 1, "total": "718", "subtotal": "718" }],
+      "meta_data": [
+        { "id": 26, "key": "_reduced_stock", "value": "1", "display_key": "_reduced_stock", "display_value": "1" }
+      ],
+      "sku": null,
+      "global_unique_id": null,
+      "price": 3780.672269,
+      "image": { "id": 0, "src": "" },
+      "parent_name": null
+    }
+  ],
+  "tax_lines": [
+    {
+      "id": 3,
+      "rate_code": "IVA-1",
+      "rate_id": 1,
+      "label": "IVA",
+      "compound": false,
+      "tax_total": "2313",
+      "shipping_tax_total": "0",
+      "rate_percent": 19,
+      "meta_data": []
+    }
+  ],
+  "shipping_lines": [],
+  "fee_lines": [],
+  "coupon_lines": [],
+  "refunds": [],
+  "payment_url": "https://bioquimica.devwebs.cl/finalizar-compra/order-pay/5914/?pay_for_order=true&key=wc_order_fdm6Qyn8odsPw",
+  "is_editable": true,
+  "needs_payment": false,
+  "needs_processing": false,
+  "date_created_gmt": "2026-08-20T20:53:34",
+  "date_modified_gmt": "2026-08-20T20:53:47",
+  "date_completed_gmt": null,
+  "date_paid_gmt": null,
+  "currency_symbol": "$",
+  "bio_commerce": {
+    "schema_version": "1.0",
+    "source": {
+      "system": "WooCommerce",
+      "site": "https://bioquimica.devwebs.cl/",
+      "generated_at": "2026-08-28T16:04:30-03:00"
+    },
+    "sap_reference": {
+      "external_id": "5914",
+      "woocommerce_order_id": 5914,
+      "woocommerce_order_number": "5914",
+      "sap_document_id": null,
+      "doc_entry": null,
+      "doc_num": null
+    },
+    "order": {
+      "id": 5914,
+      "number": "5914",
+      "parent_id": 0,
+      "status": "on-hold",
+      "status_label": "En espera",
+      "created_at": "2026-08-20T17:53:34+00:00",
+      "updated_at": "2026-08-20T17:53:47+00:00",
+      "created_via": "checkout",
+      "customer_note": "pedido de prueba"
+    },
+    "customer": {
+      "id": 1,
+      "username": "angelo@piso29.cl",
+      "email": "angelo@piso29.cl",
+      "first_name": "angelo",
+      "last_name": "caro",
+      "phone": "+56951306275",
+      "company": "piso29"
+    },
+    "tax_document": {
+      "type": null,
+      "sii_code": null,
+      "tax_id": "11222333-2",
+      "document_number": null,
+      "business_name": "piso29",
+      "business_activity": null,
+      "business_activity_code": null,
+      "sii_industry_code": null,
+      "status": "provided",
+      "source": "woocommerce_order_fields_and_meta"
+    },
+    "billing_address": {
+      "first_name": "angelo",
+      "last_name": "caro",
+      "company": "piso29",
+      "address_1": "cam 123 prueba",
+      "address_2": "",
+      "city": "",
+      "state": "CL_114",
+      "region": "Metropolitana de Santiago",
+      "comuna": "",
+      "postcode": "",
+      "country": "CL",
+      "phone": "+56951306275",
+      "email": "angelo@piso29.cl"
+    },
+    "shipping_address": {
+      "first_name": "",
+      "last_name": "",
+      "company": "",
+      "address_1": "",
+      "address_2": "",
+      "city": "",
+      "state": "",
+      "region": null,
+      "comuna": "",
+      "postcode": "",
+      "country": "",
+      "phone": null,
+      "email": null
+    },
+    "products": [
+      {
+        "item_id": 1,
+        "product_id": null,
+        "variation_id": 0,
+        "sku": null,
+        "name": "Taza Vaso Precipitado - 100mL (Set 4 unidades)",
+        "quantity": 1,
+        "unit_price": 8395,
+        "subtotal": 8395,
+        "discount": 0,
+        "total_before_tax": 8395,
+        "tax": 1595,
+        "total_including_tax": 9990,
+        "tax_class": ""
+      },
+      {
+        "item_id": 2,
+        "product_id": null,
+        "variation_id": 0,
+        "sku": null,
+        "name": "Taza Vaso Precipitado - 300 mL",
+        "quantity": 1,
+        "unit_price": 3781,
+        "subtotal": 3781,
+        "discount": 0,
+        "total_before_tax": 3781,
+        "tax": 718,
+        "total_including_tax": 4499,
+        "tax_class": ""
+      }
+    ],
+    "coupons": [],
+    "fees": [],
+    "totals": {
+      "currency": "CLP",
+      "subtotal": 12176,
+      "discount_total": 0,
+      "discount_tax": 0,
+      "shipping_total": 0,
+      "shipping_tax": 0,
+      "cart_tax": 2313,
+      "total_tax": 2313,
+      "total": 14489
+    },
+    "shipping": {
+      "total": 0,
+      "tax": 0,
+      "courier": null,
+      "courier_code": null,
+      "lines": []
+    },
+    "payment": {
+      "method": "bacs",
+      "method_title": "Transferencia bancaria directa",
+      "transaction_id": null,
+      "paid": false,
+      "transfer_proof": {
+        "uploaded": false,
+        "attachment_id": null,
+        "filename": null,
+        "mime": null,
+        "status": null
+      },
+      "paid_at": null
+    },
+    "integration": {
+      "courier": null,
+      "courier_code": null,
+      "quote_id": null,
+      "quote_mode": false
+    }
+  },
+  "_links": {
+    "self": [
+      {
+        "href": "https://bioquimica.devwebs.cl/wp-json/wc/v3/orders/5914",
+        "targetHints": { "allow": ["GET", "POST", "PUT", "PATCH", "DELETE"] }
+      }
+    ],
+    "collection": [{ "href": "https://bioquimica.devwebs.cl/wp-json/wc/v3/orders" }],
+    "email_templates": [
+      { "embeddable": true, "href": "https://bioquimica.devwebs.cl/wp-json/wc/v3/orders/5914/actions/email_templates" }
+    ],
+    "customer": [{ "href": "https://bioquimica.devwebs.cl/wp-json/wc/v3/customers/1" }]
+  }
+}
