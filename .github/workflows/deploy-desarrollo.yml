@@ -12,7 +12,7 @@ jobs:
   deploy:
     runs-on: self-hosted
     env:
-      DEPLOY_DIR: /home/bioquimicacl/BQ-Integraciones
+      DEPLOY_DIR: /home/bioquimicacl/BQ-Integraciones-Test
     steps:
       # actions/checkout rechaza cualquier "path" fuera del workspace propio del runner (protección
       # de seguridad, no bypasseable) — por eso clona en el workspace default y después se
