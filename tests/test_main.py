@@ -16,6 +16,16 @@ def test_health_no_requiere_api_key_aunque_este_configurada(monkeypatch):
     assert respuesta.status_code == 200
 
 
+def test_docs_no_requiere_api_key(monkeypatch):
+    """Swagger UI queda exento -- ver el spec no es sensible, USAR los
+    endpoints reales si sigue exigiendo la key."""
+    monkeypatch.setattr(main.settings, "API_KEY", "secreta123")
+    cliente = TestClient(main.app)
+
+    assert cliente.get("/docs").status_code == 200
+    assert cliente.get("/openapi.json").status_code == 200
+
+
 def test_otro_endpoint_sin_key_devuelve_401(monkeypatch):
     monkeypatch.setattr(main.settings, "API_KEY", "secreta123")
     cliente = TestClient(main.app)

@@ -27,7 +27,7 @@ app.include_router(failures_routes.router)
 app.include_router(pipeline_routes.router)
 
 # ── Seguridad: API Key (BQI-64) ──────────────────────────────────────────
-_API_KEY_EXEMPT = {"/health"}
+_API_KEY_EXEMPT = {"/health", "/docs", "/redoc", "/openapi.json"}
 
 
 @app.middleware("http")
