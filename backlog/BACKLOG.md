@@ -389,8 +389,10 @@ en vivo: `notify_failure()` real devolvió `True`, correo real enviado a felipe.
   es entorno de prueba, se limpia/recrea la base antes de producción (ver plan de corte más abajo).
 - [ ] BQI-64 — Middleware API Key
 - [ ] BQI-65 — `RUNBOOK.md`
-- [ ] Chain B automática (folio → PDF → email) — falta conectar `task_poll_sap_invoices`, mismo patrón
-  que Chain A (reintentar FAILED + escalar a EXHAUSTED vía `failure_tracking`)
+- [x] Chain B automática (folio → PDF → email) — `task_poll_sap_invoices` conecta
+  `procesar_facturas_pendientes` (`app/tasks/scheduled.py::_ciclo_sap_invoices`), mismo patrón que
+  Chain A. Probada en vivo contra SAP TEST/Facele producción/Brevo real (54 facturas del incidente de
+  polling, ver más abajo). Checkbox quedó desactualizado, corregido acá — el código ya estaba.
 
 ### E7 — Pruebas (transversal)
 - [ ] BQI-70 — `conftest.py` + fixtures
@@ -412,6 +414,9 @@ diferidos a propósito hasta que se decida ir a producción. Consolidado acá pa
   BQI-21) vía `pg_dump`/`COPY` desde la base de desarrollo — no reconectar a la MySQL de Integrify.
 - [ ] BQI-12 — Alta de `bq-integraciones` en `AUTHORIZED_SERVICES` de Token-SAP-BQ de **producción**
   (hoy usa credenciales de test de `gestor-bq`, ver `memory/project_credenciales_test_vs_prod.md`).
+  **Nota (2026-08-28):** verificado en vivo que `token-sap-bq-production.up.railway.app` con
+  `gestor-bq`/`gestor-bioquimica-2026` YA responde sesión válida (`sap_db=CLPRDBIOQUIMICA`) — el
+  servicio de producción existe y el gestor tiene acceso; falta decidir el momento de usarlo desde acá.
 - [ ] Compañía SAP de producción real en `SAP_URL`/sesión (hoy `CLTSTBIOQUIMICA`, confirmado por
   `sap_db` de la sesión de Token-SAP-BQ — ver hallazgo 2026-08-18).
 - [ ] Destinatarios reales de Brevo (`BREVO_INVOICE_BCC`/`ALERT_EMAILS`, sacados de Strapi de
@@ -420,6 +425,45 @@ diferidos a propósito hasta que se decida ir a producción. Consolidado acá pa
   con `[PRUEBA]`, ningún correo llega a un cliente real (freno ya construido y probado, BQI-52).
 - [ ] `pipeline_state` arranca apagado por defecto — decidir explícitamente cuándo prenderlo
   (`POST /pipeline/enable`) recién con todo lo anterior confirmado.
+
+## 10.2 Ambiente de desarrollo desplegado (2026-08-28/09-01)
+
+Repo propio + CI/CD + ambiente `desarrollo` corriendo de punta a punta en el servidor on-prem
+(`152.230.53.151`), separado por completo de lo que eventualmente sea producción.
+
+- **Repo:** `github.com/FelipeMv2301/BQ-Integraciones`, privado. Dos ramas: `desarrollo`/`produccion`
+  (sin tilde/mayúscula a propósito, evita problemas de nombres de rama entre Windows/Linux en
+  scripts/CI). Commit inicial con `.gitignore` (excluye `.env`/`.env.*`, deja pasar `.env.example`) —
+  verificado con `git status` antes del primer commit que ningún secreto se coló.
+- **`docs/`** — reorganizados ahí todos los ejemplos de payload, `campos-payload-sap.md`,
+  `respuesta-payload-bio-commerce.md`, `catalogo-municipalities.csv` (346 filas) y el payload real de
+  BioCommerce (`ejemplo-payload-web-nuevo-bio_commerce.json`, pedido `5914`).
+- **`bq_integraciones_test`** — base Postgres nueva y limpia en el mismo servidor (`bq_integraciones`
+  original queda intacta, con la basura del incidente de polling, sin tocar). `alembic upgrade head`
+  desde cero + los 4 catálogos estáticos migrados vía `pg_dump`/`COPY` (346/9/3/9 filas, conteos
+  verificados). Requirió agregar reglas nuevas a `pg_hba.conf` (el servidor filtra por nombre de base,
+  no hay wildcard) + `pg_reload_conf()`.
+- **`.env.desarrollo`** — perfil separado del `.env` real: `WOO_URL/KEY/SECRET` apuntan al sitio de
+  prueba (`bioquimica.devwebs.cl`, ya no a `WOO_NUEVO_*`), `DATABASE_URL` a `bq_integraciones_test`,
+  `REDIS_URL` con índice `/1` (no `/0`) para que `pipeline_state`/locks/caché SAP no choquen si algún
+  día desarrollo y producción corren contra el mismo Redis, `HEALTHCHECKS_CHECKS` vacío a propósito
+  (los UUIDs de hoy son los reales de producción — un worker de prueba no debe ensuciar esa señal).
+- **CI/CD:** runner self-hosted (`actions-runner-bq-integraciones`, systemd, mismo patrón que
+  Gestor-BQ/MELI-BQ) + `.github/workflows/deploy-desarrollo.yml` — push a `desarrollo` dispara
+  `alembic upgrade head` + `docker compose up -d --build` en el servidor. `docker-compose.yml` ya traía
+  el puerto fijo (`8020:8000`) pensado para este server desde BQI-06, no hizo falta tocarlo. El `.env`
+  real vive sin trackear en el workdir del runner (`checkout` con `clean:false` para no borrarlo entre
+  corridas). Probado de punta a punta: 2 corridas fallaron limpio sin `.env` (esperado), 3ra corrida
+  con `.env` ya puesto: build completo (~10 min primera vez, sin caché) + 3 contenedores arriba +
+  `/health` → `200`.
+- **URL pública:** `https://bq-integraciones-dev.bioquimica.cl` — agregado al túnel Cloudflare
+  compartido (`mirastock/cloudflared/config.yml` + `mirastock/Caddyfile`, mismo tunnel ID que
+  mirastock/gestor/meli-dev), reverse proxy a `host.docker.internal:8020`. Requirió reiniciar
+  `caddy`/`cloudflared` de mirastock (corte de segundos para esos otros sitios). CNAME en Cloudflare
+  (`bq-integraciones-dev` → `<tunnel-id>.cfargotunnel.com`, proxied) creado por Felipe. Verificado
+  funcionando end-to-end.
+- **`pipeline_state` sigue apagado** — nada se procesa automático en este ambiente hasta prenderlo
+  explícito, ni siquiera estando desplegado y con URL pública.
 
 ## 11. Resumen del estado del proyecto
 
