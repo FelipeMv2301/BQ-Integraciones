@@ -11,17 +11,28 @@ concurrency:
 jobs:
   deploy:
     runs-on: self-hosted
+    env:
+      DEPLOY_DIR: /home/bioquimicacl/BQ-Integraciones
     steps:
+      # actions/checkout rechaza cualquier "path" fuera del workspace propio del runner (protección
+      # de seguridad, no bypasseable) — por eso clona en el workspace default y después se
+      # sincroniza a mano al directorio real de despliegue (mismo patrón que Gestor-BQ).
       - uses: actions/checkout@v4
-        with:
-          # clean:false a propósito -- el .env real vive sin trackear en el
-          # workdir del runner (nunca en el repo); un checkout limpio lo borraría.
-          clean: false
+
+      # rsync en vez de "cp -r": --delete refleja también los archivos borrados en el commit, y los
+      # --exclude protegen lo que no vive en git (el .env real, con secretos, nunca versionado) y el
+      # .git viejo de cuando este directorio se clonó/armó a mano la primera vez.
+      - name: Sincronizar código al directorio de despliegue (sin tocar .env)
+        run: |
+          mkdir -p "$DEPLOY_DIR"
+          rsync -a --delete --exclude='.env' --exclude='.git' "$GITHUB_WORKSPACE"/ "$DEPLOY_DIR"/
 
       - name: Migraciones (alembic upgrade head)
+        working-directory: ${{ env.DEPLOY_DIR }}
         run: docker compose run --rm api uv run alembic upgrade head
 
       - name: Build + up
+        working-directory: ${{ env.DEPLOY_DIR }}
         run: docker compose up -d --build
 
       - name: Limpieza de imágenes viejas
