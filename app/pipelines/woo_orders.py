@@ -8,7 +8,7 @@ memory/project_woo_payload_cambiante.md), sin tocar el resto del pipeline.
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -107,14 +107,20 @@ def _pedido_a_woo_order(pedido: dict) -> WooOrder:
 
 
 def _bc_extraer_paid_at(payload: dict) -> datetime | None:
+    """payment.paid_at llega con offset (ej. '+00:00') — la columna es
+    TIMESTAMP WITHOUT TIME ZONE, hay que despojarlo del tzinfo tras
+    normalizar a UTC."""
     valor = (payload.get("payment") or {}).get("paid_at")
     if not valor:
         return None
     try:
-        return datetime.fromisoformat(valor)
+        fecha = datetime.fromisoformat(valor)
     except ValueError:
         logger.warning("_pedido_biocommerce_a_woo_order: payment.paid_at con formato inesperado: %r", valor)
         return None
+    if fecha.tzinfo is not None:
+        fecha = fecha.astimezone(UTC).replace(tzinfo=None)
+    return fecha
 
 
 def _bc_extraer_pay_auth_code(payload: dict) -> str | None:
