@@ -129,6 +129,7 @@ Estado común a toda tabla de trabajo: `status` (`PENDING|IN_PROGRESS|COMPLETED|
 | R5 | Email cliente | `contact_email` > `customer_email`; BCC = vendedor + internos |
 | R6 | SKU/bodega de línea | resuelto contra Stock-Service (`sync_warehouse`), no tabla propia |
 | R7 | Cliente genérico boleta | `CardCode='CN55555555-5'` si no hay RUT válido — **no implementada a propósito** (2026-08-14): en Integrify no es una bifurcación real, es solo el `CardCode` resultante si Woo manda ese RUT puntual; verificado en Postgres real que 0/41 pedidos (Factura y Boleta) tienen `customer_tax_id` nulo. Se deja el `PermanentError` actual como red de seguridad hasta que aparezca un caso real en `/failures` |
+| R8 | SKU de envío por courier | La línea de despacho en `DocumentLines` (R2) debe usar el `ItemCode` real del courier/subvariante (`delivery_method_code`/`courier_code` de BioCommerce), no un SKU genérico — **hoy no implementado**: cae siempre a `SG000096` porque `delivery_methods` no tiene cargados los couriers del sitio nuevo (hallazgo 2026-09-02, ver registro E3) |
 
 ## 7. Invariantes de seguridad
 
@@ -325,6 +326,23 @@ tiene 346 filas correctas.
 - [x] BQI-34 — Validación de totales (2026-08-13) — dentro de `prepare_billing`; corregido para que además marque `WooOrder.status=FAILED` con mensaje (no solo lanzar excepción) — criterio real del ticket, 2 tests nuevos
 - [x] BQI-35 — `create_sap_invoice()` (2026-08-13) — `app/services/sap/billing.py` (`BillingPayload`/`BillingItemPayload`) + orquestador en `app/pipelines/billing.py`, 4/4 tests + verificado contra SAP real: factura creada (`DocEntry=103959`, `DocNum=7412`), R1 confirmado en SAP (`DocDate == DocDueDate == "2026-08-13"`). Hallazgo operativo: SAP rechaza CUALQUIER documento si falta la tasa de cambio USD del día — dependencia diaria a tener en cuenta para producción, no es un bug nuestro
 - [x] BQI-36 — Tests de billing (2026-08-13) — cubierto a lo largo de BQI-33/34/35 (24 tests entre `test_billing.py`/`test_create_sap_invoice.py`), no quedó pendiente aparte.
+- [ ] **SKU de envío por courier real — pendiente de implementar** (2026-09-02, no ticketeado —
+  hallazgo real durante prueba end-to-end con pedido de prueba `9234`) — `_buscar_metodo_entrega()` +
+  `_item_envio()` (`app/pipelines/billing.py`) ya arman bien la línea de envío en `DocumentLines` con
+  el monto neto sin IVA (R2, esto sí está implementado y probado), pero el SKU sale de la tabla
+  `delivery_methods`, cargada en BQI-21 con solo 3 filas **legacy del sitio viejo** (Integrify/
+  bioquimica.cl) — sin los couriers del sitio **nuevo** (BioCommerce). Ya estaba anotado como
+  comentario suelto en `docs/ejemplo-payload-sap-factura.comentado.jsonc:54` ("courier específico,
+  aún no mapeado en delivery_methods; hoy siempre sale SG000096 genérico") pero nunca se había vuelto
+  ticket. No es alcance de gestorBQ (la exclusión de "despacho/courier" en §2/D6 es sobre *logística*
+  de envío, no sobre el SKU de facturación de la línea en SAP, que sí es de este proyecto — distinción
+  que el backlog no dejaba clara). `delivery_method_code` (=`courier_code` de BioCommerce, ver
+  `_bc_extraer_delivery_method_code()` en `woo_orders.py`) coincide 1:1 con el `ItemCode` SAP
+  (confirmado contra SAP real, `campos-payload-sap.md`) — falta cargar las filas.
+  **SKUs confirmados por Felipe (2026-09-02)**: `SGmoveup` → MoveUp · `SGchistn` → Chibra Terrestre ·
+  `SGchiexp` → Chibra Express. **Starken queda pendiente** (SKU aún no definido). Falta: insertar estas
+  3 filas en `delivery_methods` (mapeo identidad `woo_code`=`sap_sku`) + agregar Starken cuando se
+  defina + test de regresión que confirme que un `courier_code` real ya no cae al genérico.
 - [x] BQI-37 — Idempotencia externa `create_sap_invoice` (2026-08-17) — `buscar_factura_existente()` en `app/services/sap/billing.py` + guard de estado y guard robusto en `app/pipelines/billing.py::create_sap_invoice`, 9/9 tests (`test_create_sap_invoice.py`/`test_sap_billing_service.py` nuevo). **Bug real encontrado al probar contra SAP real**: `U_WedDocNum` está tipado como *string* en SAP pese a representar un número — filtrar sin comillas devuelve `400` ("the given value is not a string"); corregido, confirmado `200` contra SAP real. **Épica E3 completa.**
 
 ### E4 — Folio y Facele/Docele
@@ -471,6 +489,10 @@ diferidos a propósito hasta que se decida ir a producción. Consolidado acá pa
   con `[PRUEBA]`, ningún correo llega a un cliente real (freno ya construido y probado, BQI-52).
 - [ ] `pipeline_state` arranca apagado por defecto — decidir explícitamente cuándo prenderlo
   (`POST /pipeline/enable`) recién con todo lo anterior confirmado.
+- [ ] **Couriers reales en `delivery_methods`** (2026-09-02) — cargar `SGmoveup`/`SGchistn`/
+  `SGchiexp` (MoveUp/Chibra Terrestre/Chibra Express) + Starken cuando se defina su SKU (ver R8 y
+  registro E3). Sin esto, cualquier pedido con despacho real factura con el SKU genérico `SG000096`
+  en vez del courier correcto.
 
 ## 10.2 Ambiente de desarrollo desplegado (2026-08-28/09-01)
 
@@ -515,3 +537,29 @@ Repo propio + CI/CD + ambiente `desarrollo` corriendo de punta a punta en el ser
 
 *(se completa al cierre de cada sesión de implementación — qué se hizo, qué quedó pendiente, qué se
 descubrió que cambia el plan)*
+
+### 2026-09-02 — Prueba end-to-end con pedido de prueba real
+
+Se creó un pedido de prueba real en `bioquimica.devwebs.cl` (ID `9234` — RUT propio de Felipe
+`21.269.680-3`, Factura, 2 productos reales con stock, `paid_at` seteado) para verificar la
+implementación de punta a punta. Hallazgos de la sesión:
+
+- **Bug real (nuestro, bloqueante)** — `_bc_extraer_paid_at()` (`app/pipelines/woo_orders.py`) no
+  manejaba datetimes con offset (`payment.paid_at` de BioCommerce viene con `+00:00`; la columna
+  `paid_at` es `TIMESTAMP WITHOUT TIME ZONE`) — rompía el insert en Postgres. Primer pedido de prueba
+  que trae `paid_at` real (los anteriores estaban sin pagar), nunca se había ejercitado este camino.
+  **Fixeado** (normaliza a UTC naive), `ruff` limpio, 23/23 tests — **pendiente de commit/push** para
+  llegar al ambiente `desarrollo` desplegado.
+- **Falso bug** (era la data de prueba armada por Claude, no el pipeline ni el plugin) — el pedido de
+  prueba se armó primero con meta_data del esquema viejo (`_billing_*`, Integrify) en vez del esquema
+  real que usa el checkout hoy (`_bio_*`) — confirmado comparando contra un pedido real de checkout
+  (`9232`). `docs/respuesta-payload-bio-commerce.md` (28-ago) quedó **obsoleto**: reporta como bug del
+  plugin algo que ya no aplica con el esquema `_bio_*` actual. Corregido el meta_data de `9234`, el
+  payload normalizado ahora trae `sii_code`/`business_activity_code`/comuna completos.
+- **Gap real, sin cerrar** — SKU de envío por courier (R8, registro E3): hoy cualquier despacho
+  factura con el SKU genérico `SG000096`. 3 SKUs ya confirmados por Felipe, Starken pendiente — falta
+  cargarlos en `delivery_methods`.
+
+**Pendiente para la próxima sesión**: commit+push del fix de `paid_at`, cargar los couriers en
+`delivery_methods`, y volver a disparar `sync-order-biocommerce/9234` contra el servidor real para
+completar la prueba de punta a punta (todavía no se llegó a `create_sap_invoice`).
