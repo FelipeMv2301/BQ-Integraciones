@@ -4,7 +4,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, select
 
 from app.models.reference_data import Industry, Municipality
 from app.models.sap_customer import SAPCustomer
@@ -133,12 +133,37 @@ async def test_sap_rechaza_el_payload_marca_failed_y_lanza_transient_error(sessi
     with pytest.raises(TransientError):
         await pipeline.resolve_customer(session, "12345678-5", _DATOS_CLIENTE)
 
-    from sqlmodel import select
     cliente = (
         await session.execute(select(SAPCustomer).where(SAPCustomer.tax_id == "12345678-5"))
     ).scalar_one()
     assert cliente.status == "FAILED"
     assert "400" in cliente.status_message
+
+
+async def test_create_or_update_lanza_excepcion_marca_failed_y_sube_attempts(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02): create_or_update() no tenía try/except
+    -- si la llamada a SAP lanzaba (timeout, ConnectionError) en vez de
+    devolver una respuesta con ok=False, la excepción salía ANTES de
+    cliente.attempts += 1. escalar_si_agotado() nunca veía el contador
+    subir, la entidad se reintentaba en silencio para siempre.
+    """
+    monkeypatch.setattr(pipeline.sap_customers, "find_by_rut", lambda rut: [])
+
+    def _create_or_update_caido(existe, payload, code=None):
+        raise ConnectionError("SAP no responde")
+
+    monkeypatch.setattr(pipeline.sap_customers, "create_or_update", _create_or_update_caido)
+
+    with pytest.raises(TransientError):
+        await pipeline.resolve_customer(session, "12345678-5", _DATOS_CLIENTE)
+
+    cliente = (
+        await session.execute(select(SAPCustomer).where(SAPCustomer.tax_id == "12345678-5"))
+    ).scalar_one()
+    assert cliente.status == "FAILED"
+    assert cliente.attempts == 1
+    assert "SAP no responde" in cliente.status_message
 
 
 # ── construir_datos_cliente (glue Woo -> resolve_customer, E6) ─────────────

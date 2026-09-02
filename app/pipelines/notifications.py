@@ -14,9 +14,10 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.config import settings
 from app.models.email import Email
-from app.models.enums import EmailEventType
+from app.models.enums import EmailEventType, SyncStatus
 from app.models.reference_data import BillDocumentType
 from app.models.sap_invoice import SAPInvoice
+from app.pipelines.errors import marcar_fallido
 from app.services.brevo import client as brevo_client
 from app.services.smtp import client as smtp_client
 
@@ -134,10 +135,7 @@ async def send_email(session: AsyncSession, email: Email) -> Email:
 
     factura = await session.get(SAPInvoice, email.sap_invoice_id)
     if factura is None:
-        email.status, email.status_message = "FAILED", "SAPInvoice asociada no existe"
-        email.attempts += 1
-        await session.commit()
-        raise TransientError(email.status_message)
+        await marcar_fallido(session, email, "SAPInvoice asociada no existe", TransientError)
 
     payload = await _payload_customer_invoice(session, email, factura)
 
@@ -152,24 +150,19 @@ async def send_email(session: AsyncSession, email: Email) -> Email:
     try:
         respuesta = brevo_client.enviar_correo(payload)
     except Exception as exc:
-        email.status, email.status_message = "FAILED", f"Error de red con Brevo: {exc}"
-        email.attempts += 1
-        await session.commit()
-        raise TransientError(str(exc)) from exc
+        await marcar_fallido(session, email, f"Error de red con Brevo: {exc}", TransientError, cause=exc)
 
-    email.attempts += 1
     datos = respuesta.json() if respuesta.content else {}
 
     if respuesta.ok and datos.get("messageId"):
         email.brevo_message_id = datos["messageId"]
-        email.status, email.status_message = "COMPLETED", None
+        email.status, email.status_message = SyncStatus.COMPLETED, None
+        email.attempts += 1
         await session.commit()
         return email
 
     mensaje = datos.get("message") or f"HTTP {respuesta.status_code}: {respuesta.text[:500]}"
-    email.status, email.status_message = "FAILED", f"Brevo: {mensaje}"
-    await session.commit()
-    raise TransientError(email.status_message)
+    await marcar_fallido(session, email, f"Brevo: {mensaje}", TransientError)
 
 _FAILURE_LOCK_PREFIX = "notify:failure:"
 _FAILURE_WINDOW_SECONDS = 3600

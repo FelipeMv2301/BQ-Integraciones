@@ -7,7 +7,9 @@ import logging
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.models.enums import SyncStatus
 from app.models.sap_invoice import SAPInvoice
+from app.pipelines.errors import marcar_fallido
 from app.services.facele import client as facele_client
 
 logger = logging.getLogger(__name__)
@@ -34,34 +36,24 @@ async def fetch_pdf(session: AsyncSession, factura: SAPInvoice) -> SAPInvoice:
             doc_type_code=int(factura.doc_type_code), folio=factura.folio
         )
     except Exception as exc:
-        factura.status, factura.status_message = "FAILED", f"Error consultando Facele/Docele: {exc}"
-        factura.attempts += 1
-        await session.commit()
-        raise TransientError(str(exc)) from exc
+        await marcar_fallido(
+            session, factura, f"Error consultando Facele/Docele: {exc}", TransientError, cause=exc
+        )
 
     if resultado["estado"] != 1:
         mensaje = f"Facele/Docele: {resultado['descripcion']} (estado={resultado['estado']})"
-        factura.status, factura.status_message = "FAILED", mensaje
-        factura.attempts += 1
-        await session.commit()
-        raise TransientError(mensaje)
+        await marcar_fallido(session, factura, mensaje, TransientError)
 
     if not resultado.get("pdf"):
-        factura.status, factura.status_message = "FAILED", "Facele/Docele: estado=1 pero sin PDF"
-        factura.attempts += 1
-        await session.commit()
-        raise TransientError(factura.status_message)
+        await marcar_fallido(session, factura, "Facele/Docele: estado=1 pero sin PDF", TransientError)
 
     try:
         pdf_decodificado = facele_client.decodificar_pdf(resultado["pdf"])
     except ValueError as exc:
-        factura.status, factura.status_message = "FAILED", str(exc)
-        factura.attempts += 1
-        await session.commit()
-        raise PermanentError(str(exc)) from exc
+        await marcar_fallido(session, factura, str(exc), PermanentError, cause=exc)
 
     factura.pdf_base64 = pdf_decodificado
-    factura.status, factura.status_message = "COMPLETED", None
+    factura.status, factura.status_message = SyncStatus.COMPLETED, None
     factura.attempts += 1
     await session.commit()
     return factura
