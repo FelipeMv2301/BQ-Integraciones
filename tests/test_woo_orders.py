@@ -107,7 +107,7 @@ async def test_poll_woo_orders_guarda_pedidos_nuevos(session, monkeypatch):
 
     resultado = await pipeline.poll_woo_orders(session)
 
-    assert resultado == {"traidos": 2, "nuevos": 2, "alerta_volumen": False}
+    assert resultado == {"traidos": 2, "nuevos": 2, "fallidos": 0, "alerta_volumen": False}
     guardados = (await session.execute(select(WooOrder))).scalars().all()
     assert len(guardados) == 2
 
@@ -121,7 +121,7 @@ async def test_poll_woo_orders_no_duplica_pedidos_ya_guardados(session, monkeypa
 
     resultado = await pipeline.poll_woo_orders(session)
 
-    assert resultado == {"traidos": 2, "nuevos": 1, "alerta_volumen": False}
+    assert resultado == {"traidos": 2, "nuevos": 1, "fallidos": 0, "alerta_volumen": False}
     guardados = (await session.execute(select(WooOrder))).scalars().all()
     assert len(guardados) == 2
 
@@ -135,6 +135,26 @@ async def test_poll_woo_orders_marca_alerta_volumen_pero_no_aborta(session, monk
 
     assert resultado["alerta_volumen"] is True
     assert resultado["nuevos"] == 3  # se procesan igual, no se aborta
+
+
+async def test_poll_woo_orders_pedido_malformado_no_bloquea_a_los_demas(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02): sin try/except por pedido, uno solo
+    malformado (ej. total con un tipo de dato inesperado) lanzaba ANTES del
+    commit() y NINGÚN pedido del ciclo se guardaba, ni siquiera los válidos
+    -- Integrify-Consola (legado) sí aísla por pedido, acá no se igualaba
+    ese aislamiento (I2).
+    """
+    pedido_malo = _pedido_crudo(id_=2)
+    pedido_malo["total"] = {"esto": "no es un monto"}  # rompe _extraer_total
+    pedidos = [_pedido_crudo(id_=1), pedido_malo, _pedido_crudo(id_=3)]
+    monkeypatch.setattr(pipeline.woo_orders_api, "obtener_pedidos", lambda modified_after=None: pedidos)
+
+    resultado = await pipeline.poll_woo_orders(session)
+
+    assert resultado == {"traidos": 3, "nuevos": 2, "fallidos": 1, "alerta_volumen": False}
+    guardados = (await session.execute(select(WooOrder))).scalars().all()
+    assert {g.code for g in guardados} == {1, 3}
 
 
 # ── BioCommerce PRO (sitio nuevo, bioquimica.devwebs.cl) ────────────────
@@ -242,7 +262,7 @@ async def test_poll_biocommerce_orders_guarda_pedidos_nuevos(session, monkeypatc
 
     resultado = await pipeline.poll_biocommerce_orders(session, "2026-08-01", "2026-09-01")
 
-    assert resultado == {"traidos": 2, "nuevos": 2, "alerta_volumen": False}
+    assert resultado == {"traidos": 2, "nuevos": 2, "fallidos": 0, "alerta_volumen": False}
     guardados = (await session.execute(select(WooOrder))).scalars().all()
     assert len(guardados) == 2
 
@@ -259,7 +279,7 @@ async def test_poll_biocommerce_orders_no_duplica_pedidos_ya_guardados(session, 
 
     resultado = await pipeline.poll_biocommerce_orders(session, "2026-08-01", "2026-09-01")
 
-    assert resultado == {"traidos": 2, "nuevos": 1, "alerta_volumen": False}
+    assert resultado == {"traidos": 2, "nuevos": 1, "fallidos": 0, "alerta_volumen": False}
     guardados = (await session.execute(select(WooOrder))).scalars().all()
     assert len(guardados) == 2
 

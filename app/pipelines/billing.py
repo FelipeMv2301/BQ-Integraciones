@@ -16,10 +16,12 @@ import pytz
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.models.enums import SyncStatus
 from app.models.reference_data import DeliveryMethod
 from app.models.sap_billing import SAPBilling
 from app.models.sap_customer import SAPCustomer
 from app.models.woo_order import WooOrder
+from app.pipelines.errors import marcar_fallido
 from app.services.sap import billing as sap_billing
 from app.services.sap import exchange_rates
 from app.services.stockservice.client import obtener_producto
@@ -33,6 +35,10 @@ _ZONA_CHILE = pytz.timezone("America/Santiago")
 
 class PermanentError(Exception):
     """Error de negocio no reintentable (dato faltante, discrepancia de totales)."""
+
+
+class TransientError(Exception):
+    """Error transitorio (SAP/Stock-Service caído, rechazo temporal) — reintentable."""
 
 
 def _fecha_pago_chile(paid_at: datetime) -> date:
@@ -124,6 +130,22 @@ async def prepare_billing(session: AsyncSession, woo_order: WooOrder) -> list[SA
             lineas.append(_item_envio(woo_order.shipping, metodo_entrega.sap_sku))
 
         lotes = _trocear(lineas)
+
+        # Validar ANTES de tocar la sesión: si hay discrepancia, ningún
+        # SAPBilling llega a agregarse -- el except de abajo comitea solo
+        # el WooOrder marcado FAILED. Antes esta validación corría DESPUÉS
+        # del loop que ya había hecho session.add() de cada chunk nuevo, así
+        # que una discrepancia dejaba filas SAPBilling huérfanas persistidas
+        # igual (el commit del except las arrastraba) — bug real, auditoría
+        # 2026-09-02.
+        total_calculado = sum(
+            linea["total"] + linea["total_tax"] for lote in lotes for linea in lote
+        )
+        if total_calculado != woo_order.total:
+            raise PermanentError(
+                f"Discrepancia de totales: WooOrder={woo_order.total}, SAPBilling={total_calculado}"
+            )
+
         fecha = _fecha_pago_chile(woo_order.paid_at)
         notas = f"Pedido web {woo_order.reference}"
 
@@ -158,25 +180,15 @@ async def prepare_billing(session: AsyncSession, woo_order: WooOrder) -> list[SA
                 session.add(facturacion)
             facturaciones.append(facturacion)
 
-        total_facturado = sum(f.total for f in facturaciones)
-        if total_facturado != woo_order.total:
-            raise PermanentError(
-                f"Discrepancia de totales: WooOrder={woo_order.total}, SAPBilling={total_facturado}"
-            )
-
-        woo_order.status = "COMPLETED"
+        woo_order.status = SyncStatus.COMPLETED
         await session.commit()
         return facturaciones
 
     except PermanentError as exc:
-        woo_order.status = "FAILED"
-        woo_order.status_message = str(exc)
-        woo_order.attempts += 1
-        await session.commit()
-        raise
+        await marcar_fallido(session, woo_order, str(exc), PermanentError, cause=exc)
+    except Exception as exc:
+        await marcar_fallido(session, woo_order, f"Error inesperado: {exc}", TransientError, cause=exc)
 
-class TransientError(Exception):
-    """Error transitorio (SAP caído, rechazo temporal) — reintentable."""
 
 async def create_sap_invoice(session: AsyncSession, factura: SAPBilling, woo_order: WooOrder) -> SAPBilling:
     """
@@ -189,16 +201,20 @@ async def create_sap_invoice(session: AsyncSession, factura: SAPBilling, woo_ord
     (crash entre el POST exitoso y el commit), la adopta en vez de
     duplicarla.
     """
-    if factura.status == "COMPLETED":
+    if factura.status == SyncStatus.COMPLETED:
         return factura
 
-    existente = sap_billing.buscar_factura_existente(
-        order_num=woo_order.reference, total=factura.total, doc_type_code=factura.doc_type_code,
-    )
+    try:
+        existente = sap_billing.buscar_factura_existente(
+            order_num=woo_order.reference, total=factura.total, doc_type_code=factura.doc_type_code,
+        )
+    except Exception as exc:
+        await marcar_fallido(session, factura, f"Error consultando SAP: {exc}", TransientError, cause=exc)
+
     if existente:
         factura.doc_entry = existente.get("DocEntry")
         factura.doc_num = existente.get("DocNum")
-        factura.status, factura.status_message = "COMPLETED", None
+        factura.status, factura.status_message = SyncStatus.COMPLETED, None
         await session.commit()
         return factura
 
@@ -208,35 +224,34 @@ async def create_sap_invoice(session: AsyncSession, factura: SAPBilling, woo_ord
         )
     ).scalar_one_or_none()
     if cliente is None or not cliente.code:
-        factura.status, factura.status_message = "FAILED", "Cliente SAP no resuelto"
-        factura.attempts += 1
-        await session.commit()
-        raise PermanentError(f"SAPCustomer no encontrado para tax_id={woo_order.customer_tax_id!r}")
+        await marcar_fallido(session, factura, "Cliente SAP no resuelto", PermanentError)
 
     try:
         exchange_rates.asegurar_tasa_cambio(factura.doc_date)
     except Exception as exc:
-        factura.status, factura.status_message = "FAILED", f"Tasa de cambio: {exc}"
-        factura.attempts += 1
-        await session.commit()
-        raise TransientError(factura.status_message) from exc
+        await marcar_fallido(session, factura, f"Tasa de cambio: {exc}", TransientError, cause=exc)
 
-    payload = sap_billing.BillingPayload.build(factura, cliente, woo_order.reference).model_dump(
-        by_alias=True, exclude_none=True
-    )
+    try:
+        payload = sap_billing.BillingPayload.build(factura, cliente, woo_order.reference).model_dump(
+            by_alias=True, exclude_none=True
+        )
+    except Exception as exc:
+        await marcar_fallido(session, factura, f"Payload inválido: {exc}", PermanentError, cause=exc)
 
-    respuesta = sap_billing.create_sap_invoice(payload)
-    factura.attempts += 1
+    try:
+        respuesta = sap_billing.create_sap_invoice(payload)
+    except Exception as exc:
+        await marcar_fallido(session, factura, f"Error llamando a SAP: {exc}", TransientError, cause=exc)
 
     if respuesta.ok:
         datos = respuesta.json()
         factura.doc_entry = datos.get("DocEntry")
         factura.doc_num = datos.get("DocNum")
-        factura.status, factura.status_message = "COMPLETED", None
+        factura.status, factura.status_message = SyncStatus.COMPLETED, None
+        factura.attempts += 1
         await session.commit()
         return factura
 
-    factura.status = "FAILED"
-    factura.status_message = f"SAP {respuesta.status_code}: {respuesta.text[:500]}"
-    await session.commit()
-    raise TransientError(factura.status_message)
+    await marcar_fallido(
+        session, factura, f"SAP {respuesta.status_code}: {respuesta.text[:500]}", TransientError
+    )

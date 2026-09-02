@@ -223,9 +223,9 @@ def _pedido_biocommerce_a_woo_order(payload: dict) -> WooOrder:
         code=orden["id"],
         reference=int(orden["number"]),
         paid_at=_bc_extraer_paid_at(payload),
-        total=int(totals["total"]),
-        discount=int(totals["discount_total"]),
-        shipping=int(totals["shipping_total"]),
+        total=int(float(totals["total"])),
+        discount=int(float(totals["discount_total"])),
+        shipping=int(float(totals["shipping_total"])),
         pay_auth_code=_bc_extraer_pay_auth_code(payload),
         delivery_method_code=_bc_extraer_delivery_method_code(payload),
         bill_doc_type_code=_bc_extraer_doc_type_code(payload),
@@ -236,67 +236,96 @@ def _pedido_biocommerce_a_woo_order(payload: dict) -> WooOrder:
     )
 
 
+async def _ingerir_pedidos(
+    session: AsyncSession,
+    pedidos_crudos: list[dict],
+    codigo_pedido,
+    adaptar,
+    nombre_ciclo: str,
+) -> dict:
+    """
+    Núcleo compartido de poll_woo_orders/poll_biocommerce_orders — dedup por
+    código + circuit breaker I3 + guardado, aislado por pedido (I2).
+
+    Antes cada función tenía su propio loop `for pedido in pedidos_nuevos:
+    session.add(adaptar(pedido))` sin try/except: un solo pedido malformado
+    (tipo de dato inesperado en un campo, ver memoria del proyecto sobre el
+    payload de Woo cambiando entre sitios) lanzaba ANTES de llegar al
+    `commit()`, y ninguno de los pedidos del ciclo se guardaba, ni siquiera
+    los válidos — Integrify-Consola (legado) sí aísla por pedido
+    (`for/try/except/continue`), acá no se estaba igualando ese
+    aislamiento (hallazgo real, auditoría 2026-09-02).
+
+    Un pedido que falla al mapear no se marca de ninguna forma especial:
+    simplemente no se persiste, así que sigue "nuevo" (no dedupeado) y se
+    reintenta solo en el próximo ciclo — si el problema es realmente
+    permanente (dato inválido de por vida en ese pedido), va a loguear
+    error cada ciclo hasta que alguien lo revise, sin bloquear al resto.
+    """
+    codigos_existentes = set(
+        (await session.execute(select(WooOrder.code))).scalars().all()
+    )
+    pedidos_nuevos = [p for p in pedidos_crudos if codigo_pedido(p) not in codigos_existentes]
+
+    alerta_volumen = len(pedidos_nuevos) > settings.MAX_ORDERS_PER_CYCLE
+    if alerta_volumen:
+        logger.warning(
+            "%s (I3): %d pedidos nuevos supera MAX_ORDERS_PER_CYCLE=%d — "
+            "posible bug de polling/dedup, revisar; se procesan igual",
+            nombre_ciclo, len(pedidos_nuevos), settings.MAX_ORDERS_PER_CYCLE,
+        )
+
+    guardados = fallidos = 0
+    for pedido in pedidos_nuevos:
+        try:
+            session.add(adaptar(pedido))
+            guardados += 1
+        except Exception as exc:
+            fallidos += 1
+            logger.error(
+                "%s: no se pudo mapear un pedido, se omite este ciclo (reintenta el próximo, "
+                "no bloquea al resto del lote) — %s", nombre_ciclo, exc,
+            )
+
+    await session.commit()
+    logger.info(
+        "%s: %d pedidos nuevos guardados (de %d traídos, %d fallidos al mapear)",
+        nombre_ciclo, guardados, len(pedidos_crudos), fallidos,
+    )
+    return {
+        "traidos": len(pedidos_crudos), "nuevos": guardados, "fallidos": fallidos,
+        "alerta_volumen": alerta_volumen,
+    }
+
+
 async def poll_biocommerce_orders(
     session: AsyncSession, date_from: str, date_to: str, status: str | None = None,
 ) -> dict:
     """
     Ingesta de pedidos del sitio nuevo vía BioCommerce PRO — equivalente a
-    poll_woo_orders() pero para bioquimica.devwebs.cl. Mismo criterio de
-    dedup por code y circuit breaker I3. NO está conectada a Beat todavía
-    a propósito — mismo .env (WOO_NUEVO_*) que usaría el desarrollo en
-    paralelo con el sitio viejo si se conectara sin querer en producción.
+    poll_woo_orders() pero para bioquimica.devwebs.cl. NO está conectada a
+    Beat todavía a propósito — mismo .env (WOO_NUEVO_*) que usaría el
+    desarrollo en paralelo con el sitio viejo si se conectara sin querer
+    en producción.
     """
     pedidos_crudos = biocommerce_api.obtener_pedidos(date_from=date_from, date_to=date_to, status=status)
-
-    codigos_existentes = set(
-        (await session.execute(select(WooOrder.code))).scalars().all()
+    return await _ingerir_pedidos(
+        session, pedidos_crudos,
+        codigo_pedido=lambda p: p["order"]["id"],
+        adaptar=_pedido_biocommerce_a_woo_order,
+        nombre_ciclo="poll_biocommerce_orders",
     )
-    pedidos_nuevos = [p for p in pedidos_crudos if p["order"]["id"] not in codigos_existentes]
-
-    alerta_volumen = len(pedidos_nuevos) > settings.MAX_ORDERS_PER_CYCLE
-    if alerta_volumen:
-        logger.warning(
-            "poll_biocommerce_orders (I3): %d pedidos nuevos supera MAX_ORDERS_PER_CYCLE=%d — "
-            "posible bug de polling/dedup, revisar; se procesan igual",
-            len(pedidos_nuevos), settings.MAX_ORDERS_PER_CYCLE,
-        )
-
-    for pedido in pedidos_nuevos:
-        session.add(_pedido_biocommerce_a_woo_order(pedido))
-
-    await session.commit()
-    logger.info(
-        "poll_biocommerce_orders: %d pedidos nuevos guardados (de %d traídos)",
-        len(pedidos_nuevos), len(pedidos_crudos),
-    )
-    return {"traidos": len(pedidos_crudos), "nuevos": len(pedidos_nuevos), "alerta_volumen": alerta_volumen}
 
 
 async def poll_woo_orders(session: AsyncSession, modified_after: str | None = None) -> dict:
     """
     Trae pedidos 'processing' nuevos desde WooCommerce y los guarda en
-    woo_orders (dedup por code). Circuit breaker I3: si el lote de nuevos
-    supera MAX_ORDERS_PER_CYCLE, se alerta (log de warning por ahora — se
-    conecta a notify_failure en BQI-53) pero se procesa igual, no se aborta.
+    woo_orders (dedup por code).
     """
     pedidos_crudos = woo_orders_api.obtener_pedidos(modified_after=modified_after)
-
-    codigos_existentes = set(
-        (await session.execute(select(WooOrder.code))).scalars().all()
+    return await _ingerir_pedidos(
+        session, pedidos_crudos,
+        codigo_pedido=lambda p: p["id"],
+        adaptar=_pedido_a_woo_order,
+        nombre_ciclo="poll_woo_orders",
     )
-    pedidos_nuevos = [p for p in pedidos_crudos if p["id"] not in codigos_existentes]
-
-    alerta_volumen = len(pedidos_nuevos) > settings.MAX_ORDERS_PER_CYCLE
-    if alerta_volumen:
-        logger.warning(
-            "poll_woo_orders (I3): %d pedidos nuevos supera MAX_ORDERS_PER_CYCLE=%d — "
-            "posible bug de polling/dedup, revisar; se procesan igual",
-            len(pedidos_nuevos), settings.MAX_ORDERS_PER_CYCLE,
-        )
-
-    for pedido in pedidos_nuevos:
-        session.add(_pedido_a_woo_order(pedido))
-
-    await session.commit()
-    logger.info("poll_woo_orders: %d pedidos nuevos guardados (de %d traídos)", len(pedidos_nuevos), len(pedidos_crudos))
-    return {"traidos": len(pedidos_crudos), "nuevos": len(pedidos_nuevos), "alerta_volumen": alerta_volumen}
