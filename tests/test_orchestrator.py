@@ -215,6 +215,68 @@ async def test_resolve_customer_falla_corta_antes_de_billing(session, monkeypatc
     assert llamado_billing == []
 
 
+async def test_escalar_resolve_customer_sin_sap_customer_usa_resolve_customer_max_attempts(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02, copy-paste): la rama de
+    _escalar_resolve_customer sin SAPCustomer todavía usaba
+    SAP_BILLING_MAX_ATTEMPTS en vez de RESOLVE_CUSTOMER_MAX_ATTEMPTS para
+    el stage "resolve_customer" -- invisible mientras ambos valgan lo
+    mismo (10 y 10 hoy), incorrecto si se ajustan por separado.
+    """
+    orden = WooOrder(
+        code=1, reference=100, total=0, items=[], bill_doc_type_code="39",
+        customer_tax_id="12345678-5",
+    )
+    session.add(orden)
+    await session.commit()
+
+    llamados = []
+
+    async def _capturar(session, entidad, entity_type, stage, max_attempts):
+        llamados.append(max_attempts)
+
+    monkeypatch.setattr(orchestrator.failure_tracking, "escalar_si_agotado", _capturar)
+    monkeypatch.setattr(orchestrator.settings, "RESOLVE_CUSTOMER_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(orchestrator.settings, "SAP_BILLING_MAX_ATTEMPTS", 999)
+
+    await orchestrator._escalar_resolve_customer(session, orden, ValueError("RUT no válido"))
+
+    assert llamados == [3]
+
+
+async def test_permanent_error_escala_de_inmediato_sin_esperar_max_attempts(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02): un PermanentError (RUT inválido, SKU
+    inexistente...) no se arregla reintentando, pero igual esperaba a
+    agotar max_attempts (hasta ~10 ciclos de Beat golpeando SAP en vano)
+    antes de escalar a EXHAUSTED. Ahora escala en el primer intento --
+    _max_attempts_efectivo() usa el `attempts` ya subido como tope.
+    """
+    await _armar_woo_order(session)
+
+    async def _construir_datos(s, wo):
+        return {}
+
+    async def _resolve_customer_falla(s, tax_id, datos):
+        raise orchestrator.customers.PermanentError("RUT no válido")
+
+    monkeypatch.setattr(orchestrator.customers, "construir_datos_cliente", _construir_datos)
+    monkeypatch.setattr(orchestrator.customers, "resolve_customer", _resolve_customer_falla)
+    # Deliberadamente altísimo -- si el fix no funcionara, jamás se alcanzaría reintentando.
+    monkeypatch.setattr(orchestrator.settings, "RESOLVE_CUSTOMER_MAX_ATTEMPTS", 999)
+
+    llamados = []
+
+    async def _capturar(session, entidad, entity_type, stage, max_attempts):
+        llamados.append(max_attempts)
+
+    monkeypatch.setattr(orchestrator.failure_tracking, "escalar_si_agotado", _capturar)
+
+    await orchestrator.sync_order_to_sap(session, 1001)
+
+    assert llamados == [1]  # attempts subió 0 -> 1 en _escalar_resolve_customer, se usó como tope
+
+
 async def test_prepare_billing_falla_corta_antes_de_crear_facturas(session, monkeypatch):
     await _armar_woo_order(session)
     _mock_ok(monkeypatch)

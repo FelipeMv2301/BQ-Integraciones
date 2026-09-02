@@ -32,6 +32,27 @@ from app.services.woocommerce import orders as woo_orders_api
 
 logger = logging.getLogger(__name__)
 
+# customers/billing/documents definen su propia clase PermanentError (sin
+# jerarquía compartida entre pipelines) -- se agrupan acá para poder
+# distinguirlas de un TransientError genérico en un solo isinstance().
+_ERRORES_PERMANENTES = (customers.PermanentError, billing.PermanentError, documents.PermanentError)
+
+
+def _max_attempts_efectivo(entidad, max_attempts_configurado: int, exc: Exception) -> int:
+    """
+    Un PermanentError (RUT inválido, SKU inexistente en Stock-Service, PDF
+    malformado...) no se arregla reintentando -- antes igual esperaba a
+    agotar max_attempts (hasta ~10 ciclos de Beat golpeando SAP/
+    Stock-Service en vano) antes de escalar a EXHAUSTED (hallazgo real,
+    auditoría 2026-09-02). Acá se fuerza el escalamiento inmediato: como
+    `entidad.attempts` ya subió (la función de pipeline que lanzó ya
+    llamó marcar_fallido antes de propagar), pasar ese mismo valor como
+    tope hace que escalar_si_agotado() escale ya, en el primer intento.
+    """
+    if isinstance(exc, _ERRORES_PERMANENTES):
+        return entidad.attempts
+    return max_attempts_configurado
+
 
 async def _obtener_o_crear_woo_order(session: AsyncSession, code: int) -> WooOrder:
     woo_order = (
@@ -80,7 +101,8 @@ async def _escalar_resolve_customer(session: AsyncSession, woo_order: WooOrder, 
     ).scalar_one_or_none()
     if cliente is not None:
         await failure_tracking.escalar_si_agotado(
-            session, cliente, "SAPCustomer", "resolve_customer", settings.RESOLVE_CUSTOMER_MAX_ATTEMPTS,
+            session, cliente, "SAPCustomer", "resolve_customer",
+            _max_attempts_efectivo(cliente, settings.RESOLVE_CUSTOMER_MAX_ATTEMPTS, exc),
         )
         return
 
@@ -88,7 +110,8 @@ async def _escalar_resolve_customer(session: AsyncSession, woo_order: WooOrder, 
     woo_order.status_message = f"resolve_customer: {exc}"
     await session.commit()
     await failure_tracking.escalar_si_agotado(
-        session, woo_order, "WooOrder", "resolve_customer", settings.SAP_BILLING_MAX_ATTEMPTS,
+        session, woo_order, "WooOrder", "resolve_customer",
+        _max_attempts_efectivo(woo_order, settings.RESOLVE_CUSTOMER_MAX_ATTEMPTS, exc),
     )
 
 
@@ -105,7 +128,8 @@ async def _crear_factura_chunk(
         })
     except Exception as exc:
         await failure_tracking.escalar_si_agotado(
-            session, factura, "SAPBilling", "create_sap_invoice", settings.SAP_BILLING_MAX_ATTEMPTS,
+            session, factura, "SAPBilling", "create_sap_invoice",
+            _max_attempts_efectivo(factura, settings.SAP_BILLING_MAX_ATTEMPTS, exc),
         )
         resultado_facturas.append({
             "chunk_index": factura.chunk_index, "status": factura.status, "error": str(exc),
@@ -135,7 +159,8 @@ async def _procesar_pedido(session: AsyncSession, woo_order: WooOrder) -> dict:
     except Exception as exc:
         resultado["error"] = f"prepare_billing: {exc}"
         await failure_tracking.escalar_si_agotado(
-            session, woo_order, "WooOrder", "prepare_billing", settings.SAP_BILLING_MAX_ATTEMPTS,
+            session, woo_order, "WooOrder", "prepare_billing",
+            _max_attempts_efectivo(woo_order, settings.SAP_BILLING_MAX_ATTEMPTS, exc),
         )
         return resultado
 
@@ -221,7 +246,8 @@ async def _procesar_factura(session: AsyncSession, factura: SAPInvoice) -> dict:
         except Exception as exc:
             resultado["error"] = f"fetch_pdf: {exc}"
             await failure_tracking.escalar_si_agotado(
-                session, factura, "SAPInvoice", "fetch_pdf", settings.FACELE_MAX_ATTEMPTS,
+                session, factura, "SAPInvoice", "fetch_pdf",
+                _max_attempts_efectivo(factura, settings.FACELE_MAX_ATTEMPTS, exc),
             )
             resultado["status"] = factura.status
             return resultado
@@ -243,7 +269,8 @@ async def _procesar_factura(session: AsyncSession, factura: SAPInvoice) -> dict:
         ).scalar_one_or_none()
         if email_row is not None:
             await failure_tracking.escalar_si_agotado(
-                session, email_row, "Email", "send_email", settings.EMAIL_MAX_ATTEMPTS,
+                session, email_row, "Email", "send_email",
+                _max_attempts_efectivo(email_row, settings.EMAIL_MAX_ATTEMPTS, exc),
             )
 
     return resultado

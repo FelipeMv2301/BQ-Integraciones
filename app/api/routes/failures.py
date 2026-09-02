@@ -14,7 +14,14 @@ from app.models.sap_billing import SAPBilling
 from app.models.sap_customer import SAPCustomer
 from app.models.sap_invoice import SAPInvoice
 from app.models.woo_order import WooOrder
-from app.pipelines import billing, customers, documents, failure_tracking, notifications
+from app.pipelines import (
+    billing,
+    customers,
+    documents,
+    failure_tracking,
+    notifications,
+    orchestrator,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,7 +44,20 @@ async def listar_failures(session: AsyncSession = Depends(get_session)) -> list[
 
 
 async def _reintentar_woo_order(session: AsyncSession, entidad: WooOrder) -> None:
-    await billing.prepare_billing(session, entidad)
+    """
+    Reintenta el ciclo completo (resolve_customer + prepare_billing), no
+    solo prepare_billing -- un WooOrder puede haber escalado a EXHAUSTED
+    justo por fallar en resolve_customer (bug real, auditoría 2026-09-02:
+    antes /retry solo corría prepare_billing, dejando el cliente sin
+    resolver aunque el pedido terminara marcado COMPLETED igual, con el
+    problema real reapareciendo recién en create_sap_invoice sin traza al
+    origen). resolve_customer() es naturalmente idempotente (siempre
+    re-consulta SAP antes de decidir POST/PATCH), repetirlo acá no duplica
+    nada. orchestrator._procesar_pedido ya escala a EXHAUSTED por su
+    cuenta en cada fase (no relanza), por eso este helper no lanza
+    tampoco -- el bloque _ESCALAMIENTO del endpoint no aplica a esta tabla.
+    """
+    await orchestrator._procesar_pedido(session, entidad)
 
 
 async def _reintentar_sap_customer(session: AsyncSession, entidad: SAPCustomer) -> None:
