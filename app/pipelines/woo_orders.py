@@ -17,8 +17,27 @@ from app.core.config import settings
 from app.models.woo_order import WooOrder
 from app.services.biocommerce import orders as biocommerce_api
 from app.services.woocommerce import orders as woo_orders_api
+from app.utils.rut import es_rut_valido, normalizar_rut
 
 logger = logging.getLogger(__name__)
+
+
+def _normalizar_tax_id_ingesta(tax_id_crudo: str | None) -> str | None:
+    """
+    Normaliza el RUT (sin puntos, guion, DV mayúscula) al guardarlo en
+    woo_orders -- así toda comparación aguas abajo contra sap_customers.tax_id
+    (billing.py, invoices.py, orchestrator.py, failures.py) matchea sin que
+    cada una tenga que acordarse de normalizar por su cuenta (bug real
+    encontrado 2026-09-02: create_sap_invoice comparaba tax_id normalizado
+    contra customer_tax_id crudo, nunca encontraba al cliente ya resuelto).
+
+    Si no es un RUT válido se guarda tal cual -- la validación real sigue
+    siendo responsabilidad de resolve_customer() (I2: no se aborta la
+    ingesta del lote completo por un RUT roto de un solo pedido).
+    """
+    if tax_id_crudo and es_rut_valido(tax_id_crudo):
+        return normalizar_rut(tax_id_crudo)
+    return tax_id_crudo
 
 
 def _extraer_reference(pedido: dict) -> int:
@@ -62,7 +81,7 @@ def _extraer_metodo_entrega(pedido: dict) -> str | None:
 
 
 def _extraer_tax_id(pedido: dict) -> str | None:
-    return (pedido.get("billing") or {}).get("tax_id") or None
+    return _normalizar_tax_id_ingesta((pedido.get("billing") or {}).get("tax_id") or None)
 
 
 def _extraer_doc_type_code(pedido: dict) -> str | None:
@@ -144,6 +163,10 @@ def _bc_extraer_doc_type_code(payload: dict) -> str | None:
     return str(codigo) if codigo is not None else None
 
 
+def _bc_extraer_tax_id(payload: dict) -> str | None:
+    return _normalizar_tax_id_ingesta((payload.get("tax_document") or {}).get("tax_id"))
+
+
 def _bc_billing_address(payload: dict) -> dict:
     """
     construir_datos_cliente() espera 'state' con el CÓDIGO de comuna (no el
@@ -206,7 +229,7 @@ def _pedido_biocommerce_a_woo_order(payload: dict) -> WooOrder:
         pay_auth_code=_bc_extraer_pay_auth_code(payload),
         delivery_method_code=_bc_extraer_delivery_method_code(payload),
         bill_doc_type_code=_bc_extraer_doc_type_code(payload),
-        customer_tax_id=(payload.get("tax_document") or {}).get("tax_id"),
+        customer_tax_id=_bc_extraer_tax_id(payload),
         billing_address=_bc_billing_address(payload),
         shipping_address=_bc_shipping_address(payload),
         items=_bc_items(payload),

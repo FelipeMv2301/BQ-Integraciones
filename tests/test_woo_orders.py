@@ -69,6 +69,22 @@ def test_extraer_tax_id_y_doc_type_code():
     assert pipeline._extraer_doc_type_code(pedido) == "33"
 
 
+def test_extraer_tax_id_normaliza_puntos():
+    """Bug real 2026-09-02: create_sap_invoice comparaba tax_id normalizado
+    (guardado por resolve_customer) contra customer_tax_id crudo -- nunca
+    encontraba al cliente ya resuelto. Se normaliza en la ingesta."""
+    pedido = _pedido_crudo()
+    pedido["billing"]["tax_id"] = "19.720.592-k"
+    assert pipeline._extraer_tax_id(pedido) == "19720592-K"
+
+
+def test_normalizar_tax_id_ingesta_invalido_se_guarda_crudo():
+    """RUT inválido no explota la ingesta del lote (I2) -- resolve_customer
+    lo sigue rechazando después, por pedido."""
+    assert pipeline._normalizar_tax_id_ingesta("no-es-un-rut") == "no-es-un-rut"
+    assert pipeline._normalizar_tax_id_ingesta(None) is None
+
+
 def test_extraer_montos_convierte_a_entero():
     pedido = _pedido_crudo()
     assert pipeline._extraer_total(pedido) == 15000
@@ -210,7 +226,7 @@ def test_pedido_biocommerce_a_woo_order_mapea_todos_los_campos():
     assert orden.reference == 9232
     assert orden.total == 15231
     assert orden.shipping == 3990
-    assert orden.customer_tax_id == "19.720.592-K"
+    assert orden.customer_tax_id == "19720592-K"  # normalizado en la ingesta (sin puntos)
     assert orden.bill_doc_type_code == "33"
     assert orden.delivery_method_code == "BIODEMO"
     assert orden.billing_address["state"] == "CL_114"

@@ -178,7 +178,7 @@ async def test_biocommerce_pedido_no_existe_lo_trae_de_biocommerce(session, monk
     resultado = await orchestrator.sync_order_to_sap_biocommerce(session, 9232)
 
     assert resultado["error"] is None
-    assert resultado["cliente"] == "CN19.720.592-K"
+    assert resultado["cliente"] == "CN19720592-K"  # normalizado en la ingesta (sin puntos)
 
 
 async def test_biocommerce_pedido_no_existe_devuelve_error_sin_seguir(session, monkeypatch):
