@@ -1,8 +1,9 @@
 """Entrypoint FastAPI (BQI-60). /health es liveness puro (sin DB, para el
 healthcheck de Docker); /status sí refleja el estado real de la BD."""
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Security
 from fastapi.responses import JSONResponse
+from fastapi.security.api_key import APIKeyHeader
 
 from app.api.routes import failures as failures_routes
 from app.api.routes import pipeline as pipeline_routes
@@ -20,7 +21,13 @@ if settings.is_production and not settings.API_KEY:
         "Definir API_KEY antes de arrancar."
     )
 
-app = FastAPI(title="BQ-Integraciones")
+# Esquema de seguridad puramente cosmético: no valida nada (auto_error=False,
+# la verificación real la hace api_key_middleware más abajo) -- solo hace que
+# Swagger (/docs) muestre el botón "Authorize" para cargar X-API-Key una sola
+# vez, en vez de tener que agregarlo a mano en cada "Try it out".
+_api_key_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+app = FastAPI(title="BQ-Integraciones", dependencies=[Security(_api_key_scheme)])
 
 app.include_router(status_routes.router)
 app.include_router(failures_routes.router)
