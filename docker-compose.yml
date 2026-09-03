@@ -25,6 +25,10 @@
 # BQ-Integraciones-Prod en el mismo servidor). Sin fijarlo, Compose deriva el
 # nombre del proyecto (nombre de carpeta) — mismo criterio que ya usa
 # Gestor-BQ/Gestor-BQ-test.
+#
+# API_PORT: mismo criterio -- 8020 (desarrollo) por defecto si no se define,
+# .env de producción define API_PORT=8021 para no chocar corriendo los dos
+# stacks a la vez en el mismo servidor.
 
 services:
 
@@ -32,7 +36,7 @@ services:
     build: .
     command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
-      - "8020:8000"
+      - "${API_PORT:-8020}:8000"
     env_file: .env
     environment:
       - TZ=America/Santiago

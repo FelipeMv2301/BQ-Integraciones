@@ -1,22 +1,22 @@
-name: Deploy desarrollo
+name: Deploy produccion
 
 on:
   push:
-    branches: [desarrollo]
+    branches: [produccion]
 
 concurrency:
-  group: deploy-desarrollo
+  group: deploy-produccion
   cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: self-hosted
     env:
-      DEPLOY_DIR: /home/bioquimicacl/BQ-Integraciones-Test
+      DEPLOY_DIR: /home/bioquimicacl/BQ-Integraciones-Prod
     steps:
       # actions/checkout rechaza cualquier "path" fuera del workspace propio del runner (protección
       # de seguridad, no bypasseable) — por eso clona en el workspace default y después se
-      # sincroniza a mano al directorio real de despliegue (mismo patrón que Gestor-BQ).
+      # sincroniza a mano al directorio real de despliegue (mismo patrón que desarrollo/Gestor-BQ).
       - uses: actions/checkout@v4
 
       # Gate: nada se despliega si esto falla -- un push que rompe tests o
@@ -30,8 +30,7 @@ jobs:
           uv run pytest -q
 
       # rsync en vez de "cp -r": --delete refleja también los archivos borrados en el commit, y los
-      # --exclude protegen lo que no vive en git (el .env real, con secretos, nunca versionado) y el
-      # .git viejo de cuando este directorio se clonó/armó a mano la primera vez.
+      # --exclude protegen lo que no vive en git (el .env real, con secretos, nunca versionado).
       - name: Sincronizar código al directorio de despliegue (sin tocar .env)
         run: |
           mkdir -p "$DEPLOY_DIR"
