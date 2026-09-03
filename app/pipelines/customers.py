@@ -12,6 +12,7 @@ from app.models.enums import SyncStatus
 from app.models.reference_data import Industry, Municipality
 from app.models.sap_customer import SAPCustomer
 from app.models.woo_order import WooOrder
+from app.pipelines.errors import marcar_fallido
 from app.services.sap import customers as sap_customers
 from app.utils.rut import es_rut_valido, normalizar_rut
 from app.utils.sap_text import sanitizar_texto_sap
@@ -52,10 +53,7 @@ async def resolve_customer(session: AsyncSession, tax_id: str, datos_cliente: di
     try:
         resultados = sap_customers.find_by_rut(tax_id_normalizado)
     except Exception as exc:
-        cliente.status, cliente.status_message = SyncStatus.FAILED, f"Error consultando SAP: {exc}"
-        cliente.attempts += 1
-        await session.commit()
-        raise TransientError(str(exc)) from exc
+        await marcar_fallido(session, cliente, f"Error consultando SAP: {exc}", TransientError, cause=exc)
 
     _completar_datos_sap(cliente, resultados, tax_id_normalizado)
     _completar_datos_propios(cliente, datos_cliente)
@@ -65,23 +63,22 @@ async def resolve_customer(session: AsyncSession, tax_id: str, datos_cliente: di
             by_alias=True, exclude_none=True
         )
     except Exception as exc:
-        cliente.status, cliente.status_message = SyncStatus.FAILED, f"Payload inválido: {exc}"
-        cliente.attempts += 1
-        await session.commit()
-        raise PermanentError(str(exc)) from exc
+        await marcar_fallido(session, cliente, f"Payload inválido: {exc}", PermanentError, cause=exc)
 
-    respuesta = sap_customers.create_or_update(existe=cliente.exists, payload=payload, code=cliente.code)
-    cliente.attempts += 1
+    try:
+        respuesta = sap_customers.create_or_update(existe=cliente.exists, payload=payload, code=cliente.code)
+    except Exception as exc:
+        await marcar_fallido(session, cliente, f"Error llamando a SAP: {exc}", TransientError, cause=exc)
 
     if respuesta.ok:
         cliente.status, cliente.status_message = SyncStatus.COMPLETED, None
+        cliente.attempts += 1
         await session.commit()
         return cliente
 
-    cliente.status = SyncStatus.FAILED
-    cliente.status_message = f"SAP {respuesta.status_code}: {respuesta.text[:500]}"
-    await session.commit()
-    raise TransientError(cliente.status_message)
+    await marcar_fallido(
+        session, cliente, f"SAP {respuesta.status_code}: {respuesta.text[:500]}", TransientError
+    )
 
 
 def _completar_datos_sap(cliente: SAPCustomer, resultados: list[dict], tax_id: str) -> None:

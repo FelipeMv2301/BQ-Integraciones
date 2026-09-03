@@ -73,23 +73,81 @@ async def test_retry_ya_completed_da_409(session):
 
 # ── POST /retry — camino feliz por tabla (pipeline mockeado) ────────────
 
-async def test_retry_woo_order_llama_prepare_billing(session, monkeypatch):
-    orden = WooOrder(code=1, reference=100, total=0, items=[], bill_doc_type_code="39", status="FAILED")
+async def test_retry_woo_order_reintenta_resolve_customer_y_prepare_billing(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02): antes /retry de woo_orders solo
+    corría prepare_billing, nunca resolve_customer -- un WooOrder podía
+    haber escalado a EXHAUSTED justo por fallar en resolve_customer y el
+    retry manual nunca lo arreglaba (el cliente seguía sin resolver).
+    Ahora reintenta el ciclo completo vía orchestrator._procesar_pedido.
+    """
+    orden = WooOrder(
+        code=1, reference=100, total=0, items=[], bill_doc_type_code="39",
+        customer_tax_id="12345678-5", status="FAILED",
+    )
     session.add(orden)
     await session.commit()
 
     llamados = []
 
-    async def _fake_prepare_billing(s, woo_order):
-        llamados.append(woo_order.id)
-        woo_order.status = "COMPLETED"
+    async def _fake_construir_datos_cliente(s, wo):
+        return {"fake": "datos"}
 
-    monkeypatch.setattr(failures.billing, "prepare_billing", _fake_prepare_billing)
+    async def _fake_resolve_customer(s, tax_id, datos):
+        llamados.append("resolve_customer")
+        cliente = SAPCustomer(tax_id=tax_id, code=f"CN{tax_id}", status="COMPLETED")
+        s.add(cliente)
+        await s.commit()
+        return cliente
+
+    async def _fake_prepare_billing(s, woo_order):
+        llamados.append("prepare_billing")
+        woo_order.status = "COMPLETED"
+        return []
+
+    monkeypatch.setattr(
+        failures.orchestrator.customers, "construir_datos_cliente", _fake_construir_datos_cliente
+    )
+    monkeypatch.setattr(failures.orchestrator.customers, "resolve_customer", _fake_resolve_customer)
+    monkeypatch.setattr(failures.orchestrator.billing, "prepare_billing", _fake_prepare_billing)
 
     resultado = await failures.reintentar("woo_orders", orden.id, session)
 
-    assert llamados == [orden.id]
+    assert llamados == ["resolve_customer", "prepare_billing"]
     assert resultado["status"] == "COMPLETED"
+
+
+async def test_retry_woo_order_resolve_customer_falla_no_llega_a_prepare_billing(session, monkeypatch):
+    """Si resolve_customer sigue fallando, prepare_billing ni se intenta -- igual que _procesar_pedido."""
+    orden = WooOrder(
+        code=1, reference=100, total=0, items=[], bill_doc_type_code="39",
+        customer_tax_id="12345678-5", status="FAILED",
+    )
+    session.add(orden)
+    await session.commit()
+
+    llamados = []
+
+    async def _fake_construir_datos_cliente(s, wo):
+        return {"fake": "datos"}
+
+    async def _fake_resolve_customer(s, tax_id, datos):
+        raise ValueError("RUT rechazado por SAP")
+
+    async def _fake_prepare_billing(s, woo_order):
+        llamados.append("prepare_billing")
+        return []
+
+    monkeypatch.setattr(
+        failures.orchestrator.customers, "construir_datos_cliente", _fake_construir_datos_cliente
+    )
+    monkeypatch.setattr(failures.orchestrator.customers, "resolve_customer", _fake_resolve_customer)
+    monkeypatch.setattr(failures.orchestrator.billing, "prepare_billing", _fake_prepare_billing)
+
+    await failures.reintentar("woo_orders", orden.id, session)
+
+    assert llamados == []
+    assert orden.status_message == "resolve_customer: RUT rechazado por SAP"
 
 
 async def test_retry_sap_customer_reconstruye_datos_desde_woo_order(session, monkeypatch):

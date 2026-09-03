@@ -119,6 +119,54 @@ async def test_sap_rechaza_marca_failed_y_lanza_transient_error(session, monkeyp
     assert "400" in factura.status_message
 
 
+async def test_sap_lanza_excepcion_marca_failed_y_sube_attempts(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02): sap_billing.create_sap_invoice() no
+    tenía try/except -- si la llamada lanzaba (timeout, ConnectionError) en
+    vez de devolver ok=False, factura.attempts nunca subía y
+    escalar_si_agotado() nunca escalaba.
+    """
+    factura, orden = await _armar(session)
+    session.add(SAPCustomer(
+        tax_id="12345678-5", code="CN12345678-5", name="Cliente", phone="+56900000000",
+        email="c@example.com", contact_name="CONTACTO", ship_code="DESPACHO", bill_code="FISCAL",
+    ))
+    await session.commit()
+
+    def _create_sap_invoice_caido(payload):
+        raise ConnectionError("SAP no responde")
+
+    monkeypatch.setattr(billing.sap_billing, "create_sap_invoice", _create_sap_invoice_caido)
+
+    with pytest.raises(billing.TransientError):
+        await billing.create_sap_invoice(session, factura, orden)
+
+    assert factura.status == "FAILED"
+    assert factura.attempts == 1
+    assert "SAP no responde" in factura.status_message
+
+
+async def test_buscar_factura_existente_lanza_excepcion_marca_failed_y_sube_attempts(session, monkeypatch):
+    """Mismo bug, en la consulta previa de idempotencia externa (BQI-37)."""
+    factura, orden = await _armar(session)
+    session.add(SAPCustomer(
+        tax_id="12345678-5", code="CN12345678-5", name="Cliente", phone="+56900000000",
+        email="c@example.com", contact_name="CONTACTO", ship_code="DESPACHO", bill_code="FISCAL",
+    ))
+    await session.commit()
+
+    def _buscar_caido(**kwargs):
+        raise ConnectionError("SAP no responde")
+
+    monkeypatch.setattr(billing.sap_billing, "buscar_factura_existente", _buscar_caido)
+
+    with pytest.raises(billing.TransientError):
+        await billing.create_sap_invoice(session, factura, orden)
+
+    assert factura.status == "FAILED"
+    assert factura.attempts == 1
+
+
 async def test_factura_ya_completed_no_vuelve_a_consultar_sap(session, monkeypatch):
     """Guard barato (BQI-37): si la fila ya está COMPLETED, ni siquiera consulta SAP."""
     factura, orden = await _armar(session)

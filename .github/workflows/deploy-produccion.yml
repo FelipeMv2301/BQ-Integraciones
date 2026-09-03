@@ -1,0 +1,55 @@
+name: Deploy produccion
+
+on:
+  push:
+    branches: [produccion]
+
+concurrency:
+  group: deploy-produccion
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    env:
+      DEPLOY_DIR: /home/bioquimicacl/BQ-Integraciones-Prod
+    steps:
+      # actions/checkout rechaza cualquier "path" fuera del workspace propio del runner (protección
+      # de seguridad, no bypasseable) — por eso clona en el workspace default y después se
+      # sincroniza a mano al directorio real de despliegue (mismo patrón que desarrollo/Gestor-BQ).
+      - uses: actions/checkout@v4
+
+      # Gate: nada se despliega si esto falla -- un push que rompe tests o
+      # ruff se corta acá, antes de tocar el directorio de despliegue real.
+      # Corre en el workspace del checkout (SQLite en memoria, sin red ni
+      # Postgres real -- no depende de nada externo).
+      - name: Tests (gate)
+        # cp .env.example .env: Settings (config.py) exige varios campos sin
+        # default -- .env real nunca viaja al checkout (gitignored), así que
+        # sin esto revienta al importar antes de correr un solo test. El
+        # .example ya está versionado, sin secretos, valores vacíos alcanzan
+        # (son todos str). No contamina el deploy real: el rsync de abajo
+        # excluye .env explícitamente.
+        run: |
+          cp .env.example .env
+          uv sync --extra dev
+          uv run ruff check .
+          uv run pytest -q
+
+      # rsync en vez de "cp -r": --delete refleja también los archivos borrados en el commit, y los
+      # --exclude protegen lo que no vive en git (el .env real, con secretos, nunca versionado).
+      - name: Sincronizar código al directorio de despliegue (sin tocar .env)
+        run: |
+          mkdir -p "$DEPLOY_DIR"
+          rsync -a --delete --exclude='.env' --exclude='.git' "$GITHUB_WORKSPACE"/ "$DEPLOY_DIR"/
+
+      - name: Migraciones (alembic upgrade head)
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: docker compose run --rm api uv run alembic upgrade head
+
+      - name: Build + up
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: docker compose up -d --build
+
+      - name: Limpieza de imágenes viejas
+        run: docker image prune -f

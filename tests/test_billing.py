@@ -122,6 +122,29 @@ async def test_prepare_billing_discrepancia_marca_woo_order_failed_con_mensaje(s
     assert orden.attempts == 1
 
 
+async def test_prepare_billing_stockservice_caido_marca_failed_y_sube_attempts(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02): obtener_producto() (Stock-Service) no
+    tiene try/except propio -- una excepción cruda (Stock-Service caído)
+    salía del list comprehension de prepare_billing sin marcar el
+    WooOrder FAILED ni subir attempts, dejándolo reintentándose en
+    silencio para siempre. Distinto del caso "SKU no encontrado", que ya
+    era PermanentError manejado.
+    """
+    def _stockservice_caido(sku):
+        raise ConnectionError("Stock-Service no responde")
+
+    monkeypatch.setattr(billing, "obtener_producto", _stockservice_caido)
+    orden = await _woo_order(session)
+
+    with pytest.raises(billing.TransientError):
+        await billing.prepare_billing(session, orden)
+
+    assert orden.status == "FAILED"
+    assert orden.attempts == 1
+    assert "Stock-Service no responde" in orden.status_message
+
+
 async def test_prepare_billing_agrega_item_de_envio(session, monkeypatch):
     monkeypatch.setattr(billing, "obtener_producto", lambda sku: _producto_stock_service(1))
     metodo = DeliveryMethod(woo_code="flat_rate", sap_sku="SG000096", name="Despacho")
@@ -152,6 +175,25 @@ async def test_prepare_billing_discrepancia_de_totales_falla_permanente(session,
 
     with pytest.raises(billing.PermanentError):
         await billing.prepare_billing(session, orden)
+
+
+async def test_prepare_billing_discrepancia_no_deja_sap_billing_huerfano(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02): la validación de totales corría
+    DESPUÉS del loop que ya había hecho session.add() de cada chunk -- una
+    discrepancia dejaba filas SAPBilling huérfanas persistidas igual (el
+    commit del except las arrastraba), sin que nada las reintentara nunca
+    (procesar_pedidos_pendientes solo mira SAPBilling cuando el WooOrder
+    padre está COMPLETED).
+    """
+    monkeypatch.setattr(billing, "obtener_producto", lambda sku: _producto_stock_service(1))
+    orden = await _woo_order(session, total=9999999)
+
+    with pytest.raises(billing.PermanentError):
+        await billing.prepare_billing(session, orden)
+
+    huerfanos = (await session.execute(select(SAPBilling))).scalars().all()
+    assert huerfanos == []
 
 
 async def test_prepare_billing_es_idempotente_no_duplica_chunks(session, monkeypatch):

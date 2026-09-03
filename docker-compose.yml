@@ -19,15 +19,24 @@
 # revisar el archivo resultante: SQLModel a veces no agrega el
 # "import sqlmodel" que su propio tipo de columna necesita — sin eso,
 # "alembic upgrade head" falla con NameError.
+#
+# SIN "container_name" a propósito: un nombre fijo es global en Docker, choca
+# entre carpetas/proyectos distintos (ej. BQ-Integraciones-Test vs una futura
+# BQ-Integraciones-Prod en el mismo servidor). Sin fijarlo, Compose deriva el
+# nombre del proyecto (nombre de carpeta) — mismo criterio que ya usa
+# Gestor-BQ/Gestor-BQ-test.
+#
+# API_PORT: mismo criterio -- 8020 (desarrollo) por defecto si no se define,
+# .env de producción define API_PORT=8021 para no chocar corriendo los dos
+# stacks a la vez en el mismo servidor.
 
 services:
 
   api:
     build: .
-    container_name: bq-integraciones-api
     command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
-      - "8020:8000"
+      - "${API_PORT:-8020}:8000"
     env_file: .env
     environment:
       - TZ=America/Santiago
@@ -43,7 +52,6 @@ services:
 
   worker:
     build: .
-    container_name: bq-integraciones-worker
     command: uv run celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
     env_file: .env
     environment:
@@ -55,7 +63,6 @@ services:
 
   beat:
     build: .
-    container_name: bq-integraciones-beat
     command: uv run celery -A app.tasks.celery_app beat --loglevel=info
     env_file: .env
     environment:

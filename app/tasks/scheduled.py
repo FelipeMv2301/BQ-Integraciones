@@ -54,22 +54,28 @@ def task_poll_woo_orders(self):
 
 async def _ciclo_woo_orders() -> dict:
     """
-    Ventana fija hacia atrás (modified_after) — mismo patrón que
+    Ventana fija hacia atrás (date_from/date_to) — mismo patrón que
     Integrify-Consola (recalculada cada corrida, sin checkpoint
     persistido). Sin esto, poll_woo_orders() trae TODA la historia de
     pedidos de la tienda en cada ciclo — bug real encontrado 2026-08-18 al
     probar el batch por primera vez (3031 pedidos "nuevos" de golpe). El
     dedup por `code` que ya tiene poll_woo_orders protege el solape de la
     ventana, no hace falta guardar un timestamp aparte.
+
+    status="processing" -- mismo filtro que aplicaba el path nativo
+    (retirado 2026-09-02), solo pedidos ya pagados/en curso, no on-hold ni
+    cancelados.
     """
     from app.core.database import AsyncSessionLocal
     from app.pipelines.orchestrator import procesar_pedidos_pendientes
     from app.pipelines.woo_orders import poll_woo_orders
 
-    modified_after = (datetime.now(UTC) - timedelta(days=settings.WOO_POLL_LOOKBACK_DAYS)).isoformat()
+    hoy = datetime.now(UTC).date()
+    date_from = (hoy - timedelta(days=settings.WOO_POLL_LOOKBACK_DAYS)).isoformat()
+    date_to = (hoy + timedelta(days=1)).isoformat()  # incluye el día de hoy completo
 
     async with AsyncSessionLocal() as session:
-        ingesta = await poll_woo_orders(session, modified_after=modified_after)
+        ingesta = await poll_woo_orders(session, date_from=date_from, date_to=date_to, status="processing")
         procesamiento = await procesar_pedidos_pendientes(session)
         return {"ingesta": ingesta, "procesamiento": procesamiento}
 

@@ -1,182 +1,185 @@
 """
-Pipeline de ingesta de pedidos WooCommerce (BQI-31). Transforma pedidos
-crudos de la API (estado 'processing') en filas de woo_orders.
+Pipeline de ingesta de pedidos — payload normalizado de BioCommerce PRO
+(`/wp-json/bio-commerce/v1/`), único origen del proyecto (2026-09-02: se
+retiró el path nativo de WooCommerce que leía meta_data a mano, rompía cada
+vez que el checkout cambiaba de mecanismo, ver
+memory/project_woo_payload_cambiante.md). Transforma pedidos crudos en
+filas de woo_orders.
 
 Cada dato de negocio se extrae en su propia función chica — si el checkout
-nuevo mueve un campo, se ajusta solo esa función (ver
-memory/project_woo_payload_cambiante.md), sin tocar el resto del pipeline.
+mueve un campo, se ajusta solo esa función, sin tocar el resto del pipeline.
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.config import settings
 from app.models.woo_order import WooOrder
-from app.services.woocommerce import orders as woo_orders_api
+from app.services.biocommerce import orders as biocommerce_api
+from app.utils.rut import es_rut_valido, normalizar_rut
 
 logger = logging.getLogger(__name__)
 
 
-def _extraer_reference(pedido: dict) -> int:
-    return int(pedido["number"])
+def _normalizar_tax_id_ingesta(tax_id_crudo: str | None) -> str | None:
+    """
+    Normaliza el RUT (sin puntos, guion, DV mayúscula) al guardarlo en
+    woo_orders -- así toda comparación aguas abajo contra sap_customers.tax_id
+    (billing.py, invoices.py, orchestrator.py, failures.py) matchea sin que
+    cada una tenga que acordarse de normalizar por su cuenta (bug real
+    encontrado 2026-09-02: create_sap_invoice comparaba tax_id normalizado
+    contra customer_tax_id crudo, nunca encontraba al cliente ya resuelto).
+
+    Si no es un RUT válido se guarda tal cual -- la validación real sigue
+    siendo responsabilidad de resolve_customer() (I2: no se aborta la
+    ingesta del lote completo por un RUT roto de un solo pedido).
+    """
+    if tax_id_crudo and es_rut_valido(tax_id_crudo):
+        return normalizar_rut(tax_id_crudo)
+    return tax_id_crudo
 
 
-def _extraer_paid_at(pedido: dict) -> datetime | None:
-    """date_paid_gmt llega como string ISO — la columna es datetime, no texto."""
-    valor = pedido.get("date_paid_gmt")
+def _extraer_paid_at(payload: dict) -> datetime | None:
+    """payment.paid_at llega con offset (ej. '+00:00') — la columna es
+    TIMESTAMP WITHOUT TIME ZONE, hay que despojarlo del tzinfo tras
+    normalizar a UTC."""
+    valor = (payload.get("payment") or {}).get("paid_at")
     if not valor:
         return None
     try:
-        return datetime.fromisoformat(valor)
+        fecha = datetime.fromisoformat(valor)
     except ValueError:
-        logger.warning("poll_woo_orders: date_paid_gmt con formato inesperado: %r", valor)
+        logger.warning("_pedido_a_woo_order: payment.paid_at con formato inesperado: %r", valor)
         return None
+    if fecha.tzinfo is not None:
+        fecha = fecha.astimezone(UTC).replace(tzinfo=None)
+    return fecha
 
 
-def _extraer_total(pedido: dict) -> int:
-    return int(float(pedido["total"]))
+def _extraer_pay_auth_code(payload: dict) -> str | None:
+    valor = (payload.get("payment") or {}).get("transaction_id")
+    return str(valor).strip() or None if valor else None
 
 
-def _extraer_discount(pedido: dict) -> int:
-    return int(float(pedido.get("discount_total") or 0))
+def _extraer_delivery_method_code(payload: dict) -> str | None:
+    """
+    courier_code (ej. 'SGchistn'), no method_id — el sitio manda TODO su
+    despacho bajo un único method_id genérico ('bio_shipping_pro'); lo que
+    de verdad distingue el courier es courier_code, que además ya coincide
+    con el ItemCode real en SAP (confirmado contra SAP prod, ver
+    campos-payload-sap.md).
+    """
+    return (payload.get("shipping") or {}).get("courier_code") or None
 
 
-def _extraer_shipping(pedido: dict) -> int:
-    return int(float(pedido.get("shipping_total") or 0))
+def _extraer_doc_type_code(payload: dict) -> str | None:
+    codigo = (payload.get("tax_document") or {}).get("sii_code")
+    return str(codigo) if codigo is not None else None
 
 
-def _extraer_pay_auth_code(pedido: dict) -> str | None:
-    """Prioridad: pay_authorization_code > transaction_id (mismo criterio que Integrify-Consola)."""
-    codigo = pedido.get("pay_authorization_code") or pedido.get("transaction_id") or ""
-    return str(codigo).strip() or None
+def _extraer_tax_id(payload: dict) -> str | None:
+    return _normalizar_tax_id_ingesta((payload.get("tax_document") or {}).get("tax_id"))
 
 
-def _extraer_metodo_entrega(pedido: dict) -> str | None:
-    for linea in pedido.get("shipping_lines", []):
-        return linea.get("method_id") or None
-    return None
+def _billing_address(payload: dict) -> dict:
+    """
+    construir_datos_cliente() espera 'state' con el CÓDIGO de comuna (no el
+    nombre) — BioCommerce lo manda aparte como comuna_code, separado del
+    state/region legible para humanos.
+    """
+    tax_document = payload.get("tax_document") or {}
+    billing = payload.get("billing_address") or {}
+    return {
+        "company": tax_document.get("business_name") or billing.get("company") or "",
+        "first_name": billing.get("first_name") or "",
+        "last_name": billing.get("last_name") or "",
+        "phone": billing.get("phone") or "",
+        "email": billing.get("email") or "",
+        "address_1": billing.get("address_1") or "",
+        "address_2": billing.get("address_2") or "",
+        "state": billing.get("comuna_code"),
+        "business_activity": tax_document.get("business_activity"),
+        "industry_id": tax_document.get("business_activity_code"),
+    }
 
 
-def _extraer_tax_id(pedido: dict) -> str | None:
-    return (pedido.get("billing") or {}).get("tax_id") or None
+def _shipping_address(payload: dict) -> dict:
+    shipping = payload.get("shipping_address") or {}
+    return {
+        "first_name": shipping.get("first_name") or "",
+        "last_name": shipping.get("last_name") or "",
+        "address_1": shipping.get("address_1") or "",
+        "address_2": shipping.get("address_2") or "",
+        "state": shipping.get("comuna_code"),
+    }
 
 
-def _extraer_doc_type_code(pedido: dict) -> str | None:
-    return (pedido.get("billing") or {}).get("document_type") or None
+def _extraer_items(payload: dict) -> list[dict]:
+    return [
+        {
+            "sku": producto.get("sku"),
+            "product_id": producto.get("product_id"),
+            "quantity": producto.get("quantity"),
+            "price": producto.get("unit_price"),
+            "total": producto.get("total_before_tax"),
+            "total_tax": producto.get("tax"),
+        }
+        for producto in payload.get("products") or []
+    ]
 
 
-def _extraer_direccion(pedido: dict, clave: str) -> dict:
-    """clave: 'billing' o 'shipping' — se guarda tal cual, sin transformar."""
-    return pedido.get(clave) or {}
+def _pedido_a_woo_order(payload: dict) -> WooOrder:
+    """Adaptador para el payload normalizado de BioCommerce PRO."""
+    orden = payload["order"]
+    totals = payload["totals"]
 
-
-def _extraer_items(pedido: dict) -> list[dict]:
-    return pedido.get("line_items") or []
-
-
-def _pedido_a_woo_order(pedido: dict) -> WooOrder:
     return WooOrder(
-        code=pedido["id"],
-        reference=_extraer_reference(pedido),
-        paid_at=_extraer_paid_at(pedido),
-        total=_extraer_total(pedido),
-        discount=_extraer_discount(pedido),
-        shipping=_extraer_shipping(pedido),
-        pay_auth_code=_extraer_pay_auth_code(pedido),
-        delivery_method_code=_extraer_metodo_entrega(pedido),
-        bill_doc_type_code=_extraer_doc_type_code(pedido),
-        customer_tax_id=_extraer_tax_id(pedido),
-        billing_address=_extraer_direccion(pedido, "billing"),
-        shipping_address=_extraer_direccion(pedido, "shipping"),
-        items=_extraer_items(pedido),
+        code=orden["id"],
+        reference=int(orden["number"]),
+        paid_at=_extraer_paid_at(payload),
+        total=int(float(totals["total"])),
+        discount=int(float(totals["discount_total"])),
+        shipping=int(float(totals["shipping_total"])),
+        pay_auth_code=_extraer_pay_auth_code(payload),
+        delivery_method_code=_extraer_delivery_method_code(payload),
+        bill_doc_type_code=_extraer_doc_type_code(payload),
+        customer_tax_id=_extraer_tax_id(payload),
+        billing_address=_billing_address(payload),
+        shipping_address=_shipping_address(payload),
+        items=_extraer_items(payload),
     )
 
 
-# ── Sitio nuevo (bioquimica.devwebs.cl) — transicional ──────────────────
-#
-# Mismo pedido "crudo" de WooCommerce, pero tax_id/document_type/industria/
-# giro se movieron de `billing.*` a `meta_data` (confirmado 2026-08-21
-# comparando la API nativa del sitio nuevo contra el sitio actual). El resto
-# del payload (total, ítems, envío, direcciones) es idéntico — se reutilizan
-# las mismas funciones de extracción de arriba.
-#
-# _DOC_TYPE_MAP: el sitio nuevo manda el código interno de documento
-# ("BE"/"FE", heredado de Integrify) en vez del código SII directo que
-# mandaba el sitio actual ("33"/"39"). Confirmado con Angelo (BioCommerce,
-# 2026-08-21): Factura=33, Boleta=39 — faltan las variantes exentas si
-# llegan a usarse.
-_DOC_TYPE_MAP = {"FE": "33", "BE": "39"}
-
-
-def _meta(pedido: dict, clave: str) -> str | None:
-    for entrada in pedido.get("meta_data") or []:
-        if entrada.get("key") == clave:
-            return entrada.get("value") or None
-    return None
-
-
-def _extraer_tax_id_nuevo(pedido: dict) -> str | None:
-    return _meta(pedido, "_billing_tax_id") or _meta(pedido, "billing_tax_id")
-
-
-def _extraer_doc_type_code_nuevo(pedido: dict) -> str | None:
-    crudo = _meta(pedido, "_billing_doc_type") or _meta(pedido, "billing_doc_type")
-    return _DOC_TYPE_MAP.get(crudo, crudo)
-
-
-def _extraer_industry_nuevo(pedido: dict) -> str | None:
-    return _meta(pedido, "_billing_industry") or _meta(pedido, "billing_industry")
-
-
-def _extraer_business_activity_nuevo(pedido: dict) -> str | None:
-    return _meta(pedido, "_billing_business_activity") or _meta(pedido, "billing_business_activity")
-
-
-def _pedido_nuevo_a_woo_order(pedido: dict) -> WooOrder:
+async def poll_woo_orders(
+    session: AsyncSession, date_from: str, date_to: str, status: str | None = None,
+) -> dict:
     """
-    Igual que _pedido_a_woo_order, pero para el sitio nuevo. `industry_id`/
-    `business_activity` se inyectan dentro de `billing_address` (en vez de
-    columnas propias) para que construir_datos_cliente() los siga leyendo
-    sin cambios — solución transicional mientras se define el contrato
-    definitivo con BioCommerce.
-    """
-    billing = dict(_extraer_direccion(pedido, "billing"))
-    billing["industry_id"] = _extraer_industry_nuevo(pedido)
-    billing["business_activity"] = _extraer_business_activity_nuevo(pedido)
+    Ingesta de pedidos nuevos vía BioCommerce PRO (dedup por code + circuit
+    breaker I3, aislado por pedido -- I2).
 
-    return WooOrder(
-        code=pedido["id"],
-        reference=_extraer_reference(pedido),
-        paid_at=_extraer_paid_at(pedido),
-        total=_extraer_total(pedido),
-        discount=_extraer_discount(pedido),
-        shipping=_extraer_shipping(pedido),
-        pay_auth_code=_extraer_pay_auth_code(pedido),
-        delivery_method_code=_extraer_metodo_entrega(pedido),
-        bill_doc_type_code=_extraer_doc_type_code_nuevo(pedido),
-        customer_tax_id=_extraer_tax_id_nuevo(pedido),
-        billing_address=billing,
-        shipping_address=_extraer_direccion(pedido, "shipping"),
-        items=_extraer_items(pedido),
-    )
+    Antes este loop no tenía try/except por pedido: uno solo malformado
+    (tipo de dato inesperado en un campo, ver memoria del proyecto sobre el
+    payload de Woo cambiando entre sitios) lanzaba ANTES de llegar al
+    `commit()`, y ninguno de los pedidos del ciclo se guardaba, ni siquiera
+    los válidos — Integrify-Consola (legado) sí aísla por pedido
+    (`for/try/except/continue`), acá no se estaba igualando ese
+    aislamiento (hallazgo real, auditoría 2026-09-02).
 
-
-async def poll_woo_orders(session: AsyncSession, modified_after: str | None = None) -> dict:
+    Un pedido que falla al mapear no se marca de ninguna forma especial:
+    simplemente no se persiste, así que sigue "nuevo" (no dedupeado) y se
+    reintenta solo en el próximo ciclo — si el problema es realmente
+    permanente (dato inválido de por vida en ese pedido), va a loguear
+    error cada ciclo hasta que alguien lo revise, sin bloquear al resto.
     """
-    Trae pedidos 'processing' nuevos desde WooCommerce y los guarda en
-    woo_orders (dedup por code). Circuit breaker I3: si el lote de nuevos
-    supera MAX_ORDERS_PER_CYCLE, se alerta (log de warning por ahora — se
-    conecta a notify_failure en BQI-53) pero se procesa igual, no se aborta.
-    """
-    pedidos_crudos = woo_orders_api.obtener_pedidos(modified_after=modified_after)
+    pedidos_crudos = biocommerce_api.obtener_pedidos(date_from=date_from, date_to=date_to, status=status)
 
     codigos_existentes = set(
         (await session.execute(select(WooOrder.code))).scalars().all()
     )
-    pedidos_nuevos = [p for p in pedidos_crudos if p["id"] not in codigos_existentes]
+    pedidos_nuevos = [p for p in pedidos_crudos if p["order"]["id"] not in codigos_existentes]
 
     alerta_volumen = len(pedidos_nuevos) > settings.MAX_ORDERS_PER_CYCLE
     if alerta_volumen:
@@ -186,9 +189,24 @@ async def poll_woo_orders(session: AsyncSession, modified_after: str | None = No
             len(pedidos_nuevos), settings.MAX_ORDERS_PER_CYCLE,
         )
 
+    guardados = fallidos = 0
     for pedido in pedidos_nuevos:
-        session.add(_pedido_a_woo_order(pedido))
+        try:
+            session.add(_pedido_a_woo_order(pedido))
+            guardados += 1
+        except Exception as exc:
+            fallidos += 1
+            logger.error(
+                "poll_woo_orders: no se pudo mapear un pedido, se omite este ciclo (reintenta el "
+                "próximo, no bloquea al resto del lote) — %s", exc,
+            )
 
     await session.commit()
-    logger.info("poll_woo_orders: %d pedidos nuevos guardados (de %d traídos)", len(pedidos_nuevos), len(pedidos_crudos))
-    return {"traidos": len(pedidos_crudos), "nuevos": len(pedidos_nuevos), "alerta_volumen": alerta_volumen}
+    logger.info(
+        "poll_woo_orders: %d pedidos nuevos guardados (de %d traídos, %d fallidos al mapear)",
+        guardados, len(pedidos_crudos), fallidos,
+    )
+    return {
+        "traidos": len(pedidos_crudos), "nuevos": guardados, "fallidos": fallidos,
+        "alerta_volumen": alerta_volumen,
+    }

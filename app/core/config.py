@@ -62,23 +62,19 @@ class Settings(BaseSettings):
     STOCK_SERVICE_API_KEY: str
     STOCK_SERVICE_CACHE_TTL_SECONDS: int = 900  # 15 min, ver plan.md
 
-    # ── WooCommerce ──────────────────────────────────────────────────────────
+    # ── WooCommerce (vía BioCommerce PRO) ────────────────────────────────────
+    # Una sola URL/key/secret — el sitio activo se cambia acá, no mapeando
+    # variables por sitio. Asume BioCommerce PRO instalado en lo que sea que
+    # apunte (endpoint /wp-json/bio-commerce/v1/, no la API nativa de Woo).
     WOO_URL: str
     WOO_KEY: str
     WOO_SECRET: str
     WOO_POLL_INTERVAL_MINUTES: int = 5
-    # Ventana hacia atrás para modified_after — mismo patrón que Integrify-Consola
+    # Ventana hacia atrás para date_from — mismo patrón que Integrify-Consola
     # (ventana fija recalculada cada corrida, sin checkpoint persistido; el dedup
     # por `code` en poll_woo_orders() ya protege el solape). 1 día da margen de
     # sobra corriendo cada 5 min, sin volver a traer la tienda entera.
     WOO_POLL_LOOKBACK_DAYS: int = 1
-
-    # ── WooCommerce — sitio nuevo (bioquimica.devwebs.cl, transicional) ─────
-    # Mientras se resuelve el permiso del endpoint normalizado de BioCommerce
-    # PRO, leemos la API nativa de WooCommerce de este sitio directo.
-    WOO_NUEVO_URL: str = ""
-    WOO_NUEVO_KEY: str = ""
-    WOO_NUEVO_SECRET: str = ""
 
     # ── Facele / Docele (SOAP) ───────────────────────────────────────────────
     FACELE_URL: str

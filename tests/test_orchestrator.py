@@ -40,17 +40,6 @@ def _sin_escalamiento_por_defecto(monkeypatch):
     monkeypatch.setattr(orchestrator.failure_tracking, "escalar_si_agotado", _noop)
 
 
-def _pedido_crudo(id_=1001, number=900, tax_id="12345678-5") -> dict:
-    return {
-        "id": id_, "number": number, "status": "processing",
-        "date_paid_gmt": "2026-08-13T10:00:00", "total": "15000.00",
-        "discount_total": "0", "shipping_total": "0",
-        "pay_authorization_code": "", "transaction_id": "",
-        "shipping_lines": [], "billing": {"tax_id": tax_id, "document_type": "39"},
-        "shipping": {}, "line_items": [],
-    }
-
-
 async def _armar_woo_order(session, code=1001, tax_id="12345678-5", status="PENDING") -> WooOrder:
     orden = WooOrder(
         code=code, reference=900, total=15000, customer_tax_id=tax_id,
@@ -99,42 +88,59 @@ def _mock_ok(monkeypatch):
     monkeypatch.setattr(orchestrator.billing, "create_sap_invoice", _create_sap_invoice)
 
 
-# ── sync_order_to_sap (manual, un pedido puntual) ───────────────────────
+# ── sync_order_to_sap (manual, un pedido puntual, vía BioCommerce PRO) ──
 
-async def test_pedido_ya_existe_no_llama_a_woocommerce(session, monkeypatch):
-    await _armar_woo_order(session)
+def _payload_crudo(id_=9232, number="9232", tax_id="19.720.592-K") -> dict:
+    return {
+        "order": {"id": id_, "number": number, "status": "on-hold"},
+        "tax_document": {"sii_code": 33, "tax_id": tax_id, "business_name": "razon social prueba"},
+        "billing_address": {"first_name": "razon social prueba", "comuna_code": "CL_114"},
+        "shipping_address": {"comuna_code": "CL_114"},
+        "products": [{"sku": "RP0436B3", "product_id": 9210, "quantity": 1, "unit_price": 9446,
+                      "total_before_tax": 9446, "tax": 1795}],
+        "totals": {"total": 15231, "discount_total": 0, "shipping_total": 3990},
+        "shipping": {"courier_code": "BIODEMO"},
+        "payment": {"transaction_id": None, "paid_at": None},
+    }
+
+
+async def test_pedido_ya_existe_no_llama_a_biocommerce(session, monkeypatch):
+    await _armar_woo_order(session, code=9232)
     _mock_ok(monkeypatch)
     monkeypatch.setattr(
-        orchestrator.woo_orders_api, "obtener_pedido",
-        lambda code: (_ for _ in ()).throw(AssertionError("no debería llamar a WooCommerce")),
+        orchestrator.biocommerce_api, "obtener_pedido",
+        lambda code: (_ for _ in ()).throw(AssertionError("no debería llamar a BioCommerce")),
     )
 
-    resultado = await orchestrator.sync_order_to_sap(session, 1001)
+    resultado = await orchestrator.sync_order_to_sap(session, 9232)
 
     assert resultado["error"] is None
     assert resultado["cliente"] == "CN12345678-5"
 
 
-async def test_pedido_no_existe_lo_trae_de_woocommerce(session, monkeypatch):
-    monkeypatch.setattr(orchestrator.woo_orders_api, "obtener_pedido", lambda code: _pedido_crudo(id_=code))
+async def test_pedido_no_existe_lo_trae_de_biocommerce(session, monkeypatch):
+    monkeypatch.setattr(
+        orchestrator.biocommerce_api, "obtener_pedido",
+        lambda code: _payload_crudo(id_=code),
+    )
     _mock_ok(monkeypatch)
 
-    resultado = await orchestrator.sync_order_to_sap(session, 2002)
+    resultado = await orchestrator.sync_order_to_sap(session, 9232)
 
     assert resultado["error"] is None
-    assert resultado["cliente"] == "CN12345678-5"
+    assert resultado["cliente"] == "CN19720592-K"  # normalizado en la ingesta (sin puntos)
 
 
-async def test_pedido_no_existe_en_woocommerce_devuelve_error_sin_seguir(session, monkeypatch):
-    monkeypatch.setattr(orchestrator.woo_orders_api, "obtener_pedido", lambda code: None)
+async def test_pedido_no_existe_en_biocommerce_devuelve_error_sin_seguir(session, monkeypatch):
+    monkeypatch.setattr(orchestrator.biocommerce_api, "obtener_pedido", lambda code: None)
     llamado = []
     async def _resolve_customer(s, tax_id, datos):
         llamado.append(True)
     monkeypatch.setattr(orchestrator.customers, "resolve_customer", _resolve_customer)
 
-    resultado = await orchestrator.sync_order_to_sap(session, 3003)
+    resultado = await orchestrator.sync_order_to_sap(session, 9999)
 
-    assert "no existe en WooCommerce" in resultado["error"]
+    assert "no existe en BioCommerce" in resultado["error"]
     assert llamado == []
 
 
@@ -157,6 +163,68 @@ async def test_resolve_customer_falla_corta_antes_de_billing(session, monkeypatc
 
     assert "resolve_customer" in resultado["error"]
     assert llamado_billing == []
+
+
+async def test_escalar_resolve_customer_sin_sap_customer_usa_resolve_customer_max_attempts(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02, copy-paste): la rama de
+    _escalar_resolve_customer sin SAPCustomer todavía usaba
+    SAP_BILLING_MAX_ATTEMPTS en vez de RESOLVE_CUSTOMER_MAX_ATTEMPTS para
+    el stage "resolve_customer" -- invisible mientras ambos valgan lo
+    mismo (10 y 10 hoy), incorrecto si se ajustan por separado.
+    """
+    orden = WooOrder(
+        code=1, reference=100, total=0, items=[], bill_doc_type_code="39",
+        customer_tax_id="12345678-5",
+    )
+    session.add(orden)
+    await session.commit()
+
+    llamados = []
+
+    async def _capturar(session, entidad, entity_type, stage, max_attempts):
+        llamados.append(max_attempts)
+
+    monkeypatch.setattr(orchestrator.failure_tracking, "escalar_si_agotado", _capturar)
+    monkeypatch.setattr(orchestrator.settings, "RESOLVE_CUSTOMER_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(orchestrator.settings, "SAP_BILLING_MAX_ATTEMPTS", 999)
+
+    await orchestrator._escalar_resolve_customer(session, orden, ValueError("RUT no válido"))
+
+    assert llamados == [3]
+
+
+async def test_permanent_error_escala_de_inmediato_sin_esperar_max_attempts(session, monkeypatch):
+    """
+    Bug real (auditoría 2026-09-02): un PermanentError (RUT inválido, SKU
+    inexistente...) no se arregla reintentando, pero igual esperaba a
+    agotar max_attempts (hasta ~10 ciclos de Beat golpeando SAP en vano)
+    antes de escalar a EXHAUSTED. Ahora escala en el primer intento --
+    _max_attempts_efectivo() usa el `attempts` ya subido como tope.
+    """
+    await _armar_woo_order(session)
+
+    async def _construir_datos(s, wo):
+        return {}
+
+    async def _resolve_customer_falla(s, tax_id, datos):
+        raise orchestrator.customers.PermanentError("RUT no válido")
+
+    monkeypatch.setattr(orchestrator.customers, "construir_datos_cliente", _construir_datos)
+    monkeypatch.setattr(orchestrator.customers, "resolve_customer", _resolve_customer_falla)
+    # Deliberadamente altísimo -- si el fix no funcionara, jamás se alcanzaría reintentando.
+    monkeypatch.setattr(orchestrator.settings, "RESOLVE_CUSTOMER_MAX_ATTEMPTS", 999)
+
+    llamados = []
+
+    async def _capturar(session, entidad, entity_type, stage, max_attempts):
+        llamados.append(max_attempts)
+
+    monkeypatch.setattr(orchestrator.failure_tracking, "escalar_si_agotado", _capturar)
+
+    await orchestrator.sync_order_to_sap(session, 1001)
+
+    assert llamados == [1]  # attempts subió 0 -> 1 en _escalar_resolve_customer, se usó como tope
 
 
 async def test_prepare_billing_falla_corta_antes_de_crear_facturas(session, monkeypatch):
@@ -212,6 +280,78 @@ async def test_un_chunk_falla_sigue_con_los_demas(session, monkeypatch):
     assert "SAP rechazó" in resultado["facturas"][0]["error"]
     assert resultado["facturas"][1]["status"] == "COMPLETED"
     assert resultado["facturas"][1]["doc_entry"] == 999
+
+
+# ── sync_invoice_to_email (manual, folio -> PDF -> email) ────────────────
+
+def _mock_email_ok(monkeypatch):
+    async def _fetch_pdf(s, f):
+        f.status = "COMPLETED"
+        await s.commit()
+    async def _prepare_email(s, f):
+        email = Email(sap_invoice_id=f.id, event_type=EmailEventType.CUSTOMER_INVOICE.value, status="PENDING")
+        s.add(email)
+        await s.commit()
+        return email
+    async def _send_email(s, e):
+        e.status = "COMPLETED"
+        await s.commit()
+
+    monkeypatch.setattr(orchestrator.documents, "fetch_pdf", _fetch_pdf)
+    monkeypatch.setattr(orchestrator.notifications, "prepare_email", _prepare_email)
+    monkeypatch.setattr(orchestrator.notifications, "send_email", _send_email)
+
+
+async def test_invoice_ya_existe_no_consulta_folio_a_sap(session, monkeypatch):
+    await _armar_sap_invoice(session, doc_entry=999, status="PENDING")
+    _mock_email_ok(monkeypatch)
+    monkeypatch.setattr(
+        orchestrator.invoices, "_consultar_folio",
+        lambda doc_entry: (_ for _ in ()).throw(AssertionError("no debería consultar SAP")),
+    )
+
+    resultado = await orchestrator.sync_invoice_to_email(session, 999)
+
+    assert resultado["error"] is None
+    assert resultado["status"] == "COMPLETED"
+
+
+async def test_invoice_sin_sap_billing_devuelve_error_sin_seguir(session, monkeypatch):
+    resultado = await orchestrator.sync_invoice_to_email(session, 12345)
+
+    assert "No hay SAPBilling" in resultado["error"]
+
+
+async def test_invoice_sin_folio_todavia_devuelve_error_claro(session, monkeypatch):
+    orden = await _armar_woo_order(session)
+    factura_billing = await _armar_sap_billing(session, orden, status="COMPLETED")
+    factura_billing.doc_entry = 500
+    await session.commit()
+    monkeypatch.setattr(orchestrator.invoices, "_consultar_folio", lambda doc_entry: None)
+
+    resultado = await orchestrator.sync_invoice_to_email(session, 500)
+
+    assert "todavía no le asignó folio" in resultado["error"]
+
+
+async def test_invoice_con_folio_nuevo_crea_sap_invoice_y_sigue(session, monkeypatch):
+    orden = await _armar_woo_order(session)
+    factura_billing = await _armar_sap_billing(session, orden, status="COMPLETED")
+    factura_billing.doc_entry = 500
+    await session.commit()
+    _mock_email_ok(monkeypatch)
+    monkeypatch.setattr(
+        orchestrator.invoices, "_consultar_folio",
+        lambda doc_entry: {"DocEntry": 500, "DocNum": 42, "FolioNumber": 7412, "FolioPrefixString": "E"},
+    )
+    async def _buscar_cliente(s, tax_id):
+        return None
+    monkeypatch.setattr(orchestrator.invoices, "_buscar_cliente", _buscar_cliente)
+
+    resultado = await orchestrator.sync_invoice_to_email(session, 500)
+
+    assert resultado["error"] is None
+    assert resultado["status"] == "COMPLETED"
 
 
 # ── procesar_pedidos_pendientes (automático, Beat) ──────────────────────

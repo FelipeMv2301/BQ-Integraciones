@@ -53,15 +53,15 @@ def test_poll_sap_invoices_prendido_llama_al_ciclo_real(monkeypatch):
     assert resultado == {"folio": {"nuevas": 0}, "procesamiento": {"procesados": 0}}
 
 
-def test_ciclo_woo_orders_pasa_modified_after_con_la_ventana_configurada(monkeypatch):
+def test_ciclo_woo_orders_pasa_date_from_con_la_ventana_configurada(monkeypatch):
     """
     Regresión: sin esto, poll_woo_orders trae TODA la historia de pedidos
     en cada ciclo (bug real encontrado 2026-08-18, 3031 pedidos de golpe).
     """
     capturado = {}
 
-    async def _fake_poll(session, modified_after=None):
-        capturado["modified_after"] = modified_after
+    async def _fake_poll(session, date_from, date_to, status=None):
+        capturado["date_from"], capturado["date_to"], capturado["status"] = date_from, date_to, status
         return {"nuevos": 0}
 
     async def _fake_procesar(session):
@@ -72,6 +72,9 @@ def test_ciclo_woo_orders_pasa_modified_after_con_la_ventana_configurada(monkeyp
 
     asyncio.run(scheduled._ciclo_woo_orders())
 
-    esperado = datetime.now(UTC) - timedelta(days=settings.WOO_POLL_LOOKBACK_DAYS)
-    recibido = datetime.fromisoformat(capturado["modified_after"])
-    assert abs((recibido - esperado).total_seconds()) < 5
+    hoy = datetime.now(UTC).date()
+    esperado_desde = (hoy - timedelta(days=settings.WOO_POLL_LOOKBACK_DAYS)).isoformat()
+    esperado_hasta = (hoy + timedelta(days=1)).isoformat()
+    assert capturado["date_from"] == esperado_desde
+    assert capturado["date_to"] == esperado_hasta
+    assert capturado["status"] == "processing"

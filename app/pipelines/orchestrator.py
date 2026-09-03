@@ -3,8 +3,10 @@ Orquestador de pedidos hasta SAP y de facturas hasta el correo. Dos chains:
 
 - Chain A (pedido -> SAP): sync_order_to_sap(session, code) manual (endpoint
   /pipeline/sync-order), procesar_pedidos_pendientes(session) automático
-  (Beat, task_poll_woo_orders).
-- Chain B (folio -> PDF -> email): procesar_facturas_pendientes(session),
+  (Beat, task_poll_woo_orders). Pedidos vía BioCommerce PRO -- único origen
+  del proyecto (2026-09-02).
+- Chain B (folio -> PDF -> email): sync_invoice_to_email(session, doc_entry)
+  manual (endpoint /pipeline/sync-invoice), procesar_facturas_pendientes(session)
   automático (Beat, task_poll_sap_invoices).
 
 Ambas componen pipelines ya probados sueltos. Reintentan FAILED además de
@@ -24,11 +26,32 @@ from app.models.sap_billing import SAPBilling
 from app.models.sap_customer import SAPCustomer
 from app.models.sap_invoice import SAPInvoice
 from app.models.woo_order import WooOrder
-from app.pipelines import billing, customers, documents, failure_tracking, notifications
+from app.pipelines import billing, customers, documents, failure_tracking, invoices, notifications
 from app.pipelines.woo_orders import _pedido_a_woo_order
-from app.services.woocommerce import orders as woo_orders_api
+from app.services.biocommerce import orders as biocommerce_api
 
 logger = logging.getLogger(__name__)
+
+# customers/billing/documents definen su propia clase PermanentError (sin
+# jerarquía compartida entre pipelines) -- se agrupan acá para poder
+# distinguirlas de un TransientError genérico en un solo isinstance().
+_ERRORES_PERMANENTES = (customers.PermanentError, billing.PermanentError, documents.PermanentError)
+
+
+def _max_attempts_efectivo(entidad, max_attempts_configurado: int, exc: Exception) -> int:
+    """
+    Un PermanentError (RUT inválido, SKU inexistente en Stock-Service, PDF
+    malformado...) no se arregla reintentando -- antes igual esperaba a
+    agotar max_attempts (hasta ~10 ciclos de Beat golpeando SAP/
+    Stock-Service en vano) antes de escalar a EXHAUSTED (hallazgo real,
+    auditoría 2026-09-02). Acá se fuerza el escalamiento inmediato: como
+    `entidad.attempts` ya subió (la función de pipeline que lanzó ya
+    llamó marcar_fallido antes de propagar), pasar ese mismo valor como
+    tope hace que escalar_si_agotado() escale ya, en el primer intento.
+    """
+    if isinstance(exc, _ERRORES_PERMANENTES):
+        return entidad.attempts
+    return max_attempts_configurado
 
 
 async def _obtener_o_crear_woo_order(session: AsyncSession, code: int) -> WooOrder:
@@ -38,11 +61,11 @@ async def _obtener_o_crear_woo_order(session: AsyncSession, code: int) -> WooOrd
     if woo_order:
         return woo_order
 
-    pedido = woo_orders_api.obtener_pedido(code)
-    if pedido is None:
-        raise ValueError(f"Pedido {code} no existe en WooCommerce")
+    payload = biocommerce_api.obtener_pedido(code)
+    if payload is None:
+        raise ValueError(f"Pedido {code} no existe en BioCommerce")
 
-    woo_order = _pedido_a_woo_order(pedido)
+    woo_order = _pedido_a_woo_order(payload)
     session.add(woo_order)
     await session.commit()
     return woo_order
@@ -60,7 +83,8 @@ async def _escalar_resolve_customer(session: AsyncSession, woo_order: WooOrder, 
     ).scalar_one_or_none()
     if cliente is not None:
         await failure_tracking.escalar_si_agotado(
-            session, cliente, "SAPCustomer", "resolve_customer", settings.RESOLVE_CUSTOMER_MAX_ATTEMPTS,
+            session, cliente, "SAPCustomer", "resolve_customer",
+            _max_attempts_efectivo(cliente, settings.RESOLVE_CUSTOMER_MAX_ATTEMPTS, exc),
         )
         return
 
@@ -68,7 +92,8 @@ async def _escalar_resolve_customer(session: AsyncSession, woo_order: WooOrder, 
     woo_order.status_message = f"resolve_customer: {exc}"
     await session.commit()
     await failure_tracking.escalar_si_agotado(
-        session, woo_order, "WooOrder", "resolve_customer", settings.SAP_BILLING_MAX_ATTEMPTS,
+        session, woo_order, "WooOrder", "resolve_customer",
+        _max_attempts_efectivo(woo_order, settings.RESOLVE_CUSTOMER_MAX_ATTEMPTS, exc),
     )
 
 
@@ -85,7 +110,8 @@ async def _crear_factura_chunk(
         })
     except Exception as exc:
         await failure_tracking.escalar_si_agotado(
-            session, factura, "SAPBilling", "create_sap_invoice", settings.SAP_BILLING_MAX_ATTEMPTS,
+            session, factura, "SAPBilling", "create_sap_invoice",
+            _max_attempts_efectivo(factura, settings.SAP_BILLING_MAX_ATTEMPTS, exc),
         )
         resultado_facturas.append({
             "chunk_index": factura.chunk_index, "status": factura.status, "error": str(exc),
@@ -115,7 +141,8 @@ async def _procesar_pedido(session: AsyncSession, woo_order: WooOrder) -> dict:
     except Exception as exc:
         resultado["error"] = f"prepare_billing: {exc}"
         await failure_tracking.escalar_si_agotado(
-            session, woo_order, "WooOrder", "prepare_billing", settings.SAP_BILLING_MAX_ATTEMPTS,
+            session, woo_order, "WooOrder", "prepare_billing",
+            _max_attempts_efectivo(woo_order, settings.SAP_BILLING_MAX_ATTEMPTS, exc),
         )
         return resultado
 
@@ -192,7 +219,8 @@ async def _procesar_factura(session: AsyncSession, factura: SAPInvoice) -> dict:
         except Exception as exc:
             resultado["error"] = f"fetch_pdf: {exc}"
             await failure_tracking.escalar_si_agotado(
-                session, factura, "SAPInvoice", "fetch_pdf", settings.FACELE_MAX_ATTEMPTS,
+                session, factura, "SAPInvoice", "fetch_pdf",
+                _max_attempts_efectivo(factura, settings.FACELE_MAX_ATTEMPTS, exc),
             )
             resultado["status"] = factura.status
             return resultado
@@ -214,10 +242,61 @@ async def _procesar_factura(session: AsyncSession, factura: SAPInvoice) -> dict:
         ).scalar_one_or_none()
         if email_row is not None:
             await failure_tracking.escalar_si_agotado(
-                session, email_row, "Email", "send_email", settings.EMAIL_MAX_ATTEMPTS,
+                session, email_row, "Email", "send_email",
+                _max_attempts_efectivo(email_row, settings.EMAIL_MAX_ATTEMPTS, exc),
             )
 
     return resultado
+
+
+async def _obtener_o_confirmar_sap_invoice(session: AsyncSession, doc_entry: int) -> SAPInvoice:
+    """
+    Para /pipeline/sync-invoice/{doc_entry}: si ya existe la SAPInvoice, la
+    reutiliza. Si no, confirma contra SAP que ya tenga folio asignado (R3 —
+    no hay evento que lo avise, hay que consultar) y recién ahí la crea,
+    mismo criterio que poll_sap_invoices().
+    """
+    existente = (
+        await session.execute(select(SAPInvoice).where(SAPInvoice.doc_entry == doc_entry))
+    ).scalar_one_or_none()
+    if existente:
+        return existente
+
+    factura_billing = (
+        await session.execute(select(SAPBilling).where(SAPBilling.doc_entry == doc_entry))
+    ).scalar_one_or_none()
+    if factura_billing is None:
+        raise ValueError(f"No hay SAPBilling con doc_entry={doc_entry}")
+
+    datos = invoices._consultar_folio(doc_entry)
+    if datos is None:
+        raise ValueError(f"SAP todavía no le asignó folio a doc_entry={doc_entry} — esperar y reintentar")
+
+    woo_order = await session.get(WooOrder, factura_billing.woo_order_id)
+    cliente = await invoices._buscar_cliente(session, woo_order.customer_tax_id if woo_order else None)
+
+    sap_invoice = SAPInvoice(
+        sap_billing_id=factura_billing.id,
+        doc_entry=datos["DocEntry"],
+        doc_num=datos["DocNum"],
+        folio=datos["FolioNumber"],
+        folio_prefix=datos.get("FolioPrefixString"),
+        doc_type_code=factura_billing.doc_type_code,
+        customer_email=cliente.email if cliente else None,
+        contact_email=cliente.contact_email if cliente else None,
+    )
+    session.add(sap_invoice)
+    await session.commit()
+    return sap_invoice
+
+
+async def sync_invoice_to_email(session: AsyncSession, doc_entry: int) -> dict:
+    """Endpoint manual (/pipeline/sync-invoice/{doc_entry}) — UNA factura puntual, folio -> PDF -> email."""
+    try:
+        factura = await _obtener_o_confirmar_sap_invoice(session, doc_entry)
+    except Exception as exc:
+        return {"doc_entry": doc_entry, "sap_invoice_id": None, "status": None, "error": str(exc)}
+    return await _procesar_factura(session, factura)
 
 
 async def procesar_facturas_pendientes(session: AsyncSession) -> dict:

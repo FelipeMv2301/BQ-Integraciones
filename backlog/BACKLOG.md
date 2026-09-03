@@ -129,6 +129,7 @@ Estado común a toda tabla de trabajo: `status` (`PENDING|IN_PROGRESS|COMPLETED|
 | R5 | Email cliente | `contact_email` > `customer_email`; BCC = vendedor + internos |
 | R6 | SKU/bodega de línea | resuelto contra Stock-Service (`sync_warehouse`), no tabla propia |
 | R7 | Cliente genérico boleta | `CardCode='CN55555555-5'` si no hay RUT válido — **no implementada a propósito** (2026-08-14): en Integrify no es una bifurcación real, es solo el `CardCode` resultante si Woo manda ese RUT puntual; verificado en Postgres real que 0/41 pedidos (Factura y Boleta) tienen `customer_tax_id` nulo. Se deja el `PermanentError` actual como red de seguridad hasta que aparezca un caso real en `/failures` |
+| R8 | SKU de envío por courier | La línea de despacho en `DocumentLines` (R2) debe usar el `ItemCode` real del courier/subvariante (`delivery_method_code`/`courier_code` de BioCommerce), no un SKU genérico — **hoy no implementado**: cae siempre a `SG000096` porque `delivery_methods` no tiene cargados los couriers del sitio nuevo (hallazgo 2026-09-02, ver registro E3) |
 
 ## 7. Invariantes de seguridad
 
@@ -325,6 +326,23 @@ tiene 346 filas correctas.
 - [x] BQI-34 — Validación de totales (2026-08-13) — dentro de `prepare_billing`; corregido para que además marque `WooOrder.status=FAILED` con mensaje (no solo lanzar excepción) — criterio real del ticket, 2 tests nuevos
 - [x] BQI-35 — `create_sap_invoice()` (2026-08-13) — `app/services/sap/billing.py` (`BillingPayload`/`BillingItemPayload`) + orquestador en `app/pipelines/billing.py`, 4/4 tests + verificado contra SAP real: factura creada (`DocEntry=103959`, `DocNum=7412`), R1 confirmado en SAP (`DocDate == DocDueDate == "2026-08-13"`). Hallazgo operativo: SAP rechaza CUALQUIER documento si falta la tasa de cambio USD del día — dependencia diaria a tener en cuenta para producción, no es un bug nuestro
 - [x] BQI-36 — Tests de billing (2026-08-13) — cubierto a lo largo de BQI-33/34/35 (24 tests entre `test_billing.py`/`test_create_sap_invoice.py`), no quedó pendiente aparte.
+- [ ] **SKU de envío por courier real — pendiente de implementar** (2026-09-02, no ticketeado —
+  hallazgo real durante prueba end-to-end con pedido de prueba `9234`) — `_buscar_metodo_entrega()` +
+  `_item_envio()` (`app/pipelines/billing.py`) ya arman bien la línea de envío en `DocumentLines` con
+  el monto neto sin IVA (R2, esto sí está implementado y probado), pero el SKU sale de la tabla
+  `delivery_methods`, cargada en BQI-21 con solo 3 filas **legacy del sitio viejo** (Integrify/
+  bioquimica.cl) — sin los couriers del sitio **nuevo** (BioCommerce). Ya estaba anotado como
+  comentario suelto en `docs/ejemplo-payload-sap-factura.comentado.jsonc:54` ("courier específico,
+  aún no mapeado en delivery_methods; hoy siempre sale SG000096 genérico") pero nunca se había vuelto
+  ticket. No es alcance de gestorBQ (la exclusión de "despacho/courier" en §2/D6 es sobre *logística*
+  de envío, no sobre el SKU de facturación de la línea en SAP, que sí es de este proyecto — distinción
+  que el backlog no dejaba clara). `delivery_method_code` (=`courier_code` de BioCommerce, ver
+  `_bc_extraer_delivery_method_code()` en `woo_orders.py`) coincide 1:1 con el `ItemCode` SAP
+  (confirmado contra SAP real, `campos-payload-sap.md`) — falta cargar las filas.
+  **SKUs confirmados por Felipe (2026-09-02)**: `SGmoveup` → MoveUp · `SGchistn` → Chibra Terrestre ·
+  `SGchiexp` → Chibra Express. **Starken queda pendiente** (SKU aún no definido). Falta: insertar estas
+  3 filas en `delivery_methods` (mapeo identidad `woo_code`=`sap_sku`) + agregar Starken cuando se
+  defina + test de regresión que confirme que un `courier_code` real ya no cae al genérico.
 - [x] BQI-37 — Idempotencia externa `create_sap_invoice` (2026-08-17) — `buscar_factura_existente()` en `app/services/sap/billing.py` + guard de estado y guard robusto en `app/pipelines/billing.py::create_sap_invoice`, 9/9 tests (`test_create_sap_invoice.py`/`test_sap_billing_service.py` nuevo). **Bug real encontrado al probar contra SAP real**: `U_WedDocNum` está tipado como *string* en SAP pese a representar un número — filtrar sin comillas devuelve `400` ("the given value is not a string"); corregido, confirmado `200` contra SAP real. **Épica E3 completa.**
 
 ### E4 — Folio y Facele/Docele
@@ -387,10 +405,58 @@ en vivo: `notify_failure()` real devolvió `True`, correo real enviado a felipe.
   vivo: WooCommerce devolvió 3031 pedidos sin el filtro, **14 con el filtro**. Los ~3000 pedidos que
   quedaron mal ingeridos en esta base de prueba no se limpiaron — Felipe confirmó que no importa,
   es entorno de prueba, se limpia/recrea la base antes de producción (ver plan de corte más abajo).
-- [ ] BQI-64 — Middleware API Key
+- [x] **Ingesta del sitio nuevo vía BioCommerce PRO** (2026-09-01, no ticketeado) — Angelo arregló el
+  `permission_callback` que daba 401 en `/wp-json/bio-commerce/v1/orders/{id}/payload` y agregó el
+  masivo paginado (`/orders/payload?date_from=&date_to=&page=&per_page=`), confirmado en vivo con 3
+  keys distintas antes del fix y 1 después. Payload normalizado trae ya resuelto lo que antes había
+  que inferir a mano: `tax_document.sii_code`/`tax_id`/`business_activity_code` y —el punto que
+  bloqueaba— `billing_address.comuna_code` (código de comuna real, ej. `CL_114`), separado del
+  `state`/`region` legibles para humanos.
+  - `app/services/biocommerce/{client,orders}.py` — nuevo. Mismas credenciales que el cliente nativo
+    del sitio nuevo (`WOO_NUEVO_KEY/SECRET`), solo cambia el endpoint. Paginación por
+    `page`/`per_page`/`pagination.total_pages` (no `$skip` como SAP).
+  - `app/pipelines/woo_orders.py` — `_pedido_biocommerce_a_woo_order()` + `poll_biocommerce_orders()`
+    reemplazan al adaptador transicional `_pedido_nuevo_a_woo_order()` (leía `meta_data` a mano sobre
+    la API nativa de WooCommerce, rompía cada vez que el checkout cambiaba de mecanismo — pasó 2 veces
+    en la misma semana). `poll_biocommerce_orders()` queda armada pero **sin conectar a Beat a
+    propósito** — conectarla sin un flag de ambiente correría el riesgo de que el `.env` de producción
+    (que hoy también tiene `WOO_NUEVO_*` seteado, leftover de pruebas) empiece a mezclar pedidos de
+    prueba del sitio nuevo con la ingesta real de producción.
+  - `app/pipelines/orchestrator.py` — `sync_order_to_sap_biocommerce()` +
+    `_obtener_o_crear_woo_order_biocommerce()`, en paralelo a `sync_order_to_sap()` (sitio actual), sin
+    tocarlo — mismo criterio de aislamiento que ya se usa entre `woocommerce`/`woocommerce_nuevo`.
+    Nuevo endpoint `POST /pipeline/sync-order-biocommerce/{code}`.
+  - Paquete `app/services/woocommerce_nuevo/` **eliminado** — completamente reemplazado, sin usos
+    restantes (confirmado por grep antes de borrar).
+  - 21 tests nuevos (`test_woo_orders.py`/`test_orchestrator.py`), 207/207 tests, `ruff check .`
+    limpio. **Probado en vivo contra SAP TEST real** con el pedido `9232`: `resolve_customer` ahora
+    resuelve bien (`CN19720592-K`, comuna Buin/`CL_114` matcheada contra el catálogo real) — se frena
+    después en `prepare_billing` con `"sin paid_at"`, correcto: ese pedido de prueba sigue sin pagar de
+    verdad, no es un bug. Falta un pedido de prueba pagado con producto real para ver la factura
+    completa de punta a punta.
+- [x] BQI-64 — Middleware API Key (2026-09-01) — `app/main.py`, portado del mismo patrón que
+  Stock-Service: `@app.middleware("http")` verifica `X-API-Key` contra `settings.API_KEY` en todos
+  los endpoints salvo `/health` (exento, es el liveness del healthcheck de Docker). Si `API_KEY` está
+  vacío, no exige nada (desarrollo local sin key). Guard adicional al arrancar: en producción
+  (`ENVIRONMENT=production`) con `API_KEY` vacío, el proceso ni levanta (`RuntimeError` — mejor que
+  quede sin arrancar a que quede una API administrativa expuesta sin auth). 5 tests nuevos
+  (`tests/test_main.py`, con `TestClient` real — el middleware solo se dispara en el ciclo HTTP, no
+  llamando a las funciones de ruta directo como el resto de los tests). 212/212 tests, `ruff check .`
+  limpio. `docs/API.md` actualizado.
+- [x] **`POST /pipeline/sync-invoice/{doc_entry}`** (2026-09-01, no ticketeado) — faltaba el
+  equivalente de `sync-order` para la otra punta del pipeline: hasta hoy Facele/Brevo solo se
+  podían probar vía Chain B automática o `/retry` sobre una fila ya existente, sin forma de
+  disparar folio→PDF→correo para un `doc_entry` puntual desde cero.
+  `orchestrator.py::sync_invoice_to_email()` + `_obtener_o_confirmar_sap_invoice()`: si la
+  `SAPInvoice` ya existe la reutiliza; si no, confirma contra SAP que ya tenga folio asignado
+  (mismo criterio que `poll_sap_invoices`, "esperar" no es error) antes de crearla, y sigue con
+  `_procesar_factura()` (ya existente, reusado tal cual). 4 tests nuevos, 217/217 tests, `ruff
+  check .` limpio. `docs/API.md` actualizado.
 - [ ] BQI-65 — `RUNBOOK.md`
-- [ ] Chain B automática (folio → PDF → email) — falta conectar `task_poll_sap_invoices`, mismo patrón
-  que Chain A (reintentar FAILED + escalar a EXHAUSTED vía `failure_tracking`)
+- [x] Chain B automática (folio → PDF → email) — `task_poll_sap_invoices` conecta
+  `procesar_facturas_pendientes` (`app/tasks/scheduled.py::_ciclo_sap_invoices`), mismo patrón que
+  Chain A. Probada en vivo contra SAP TEST/Facele producción/Brevo real (54 facturas del incidente de
+  polling, ver más abajo). Checkbox quedó desactualizado, corregido acá — el código ya estaba.
 
 ### E7 — Pruebas (transversal)
 - [ ] BQI-70 — `conftest.py` + fixtures
@@ -412,6 +478,9 @@ diferidos a propósito hasta que se decida ir a producción. Consolidado acá pa
   BQI-21) vía `pg_dump`/`COPY` desde la base de desarrollo — no reconectar a la MySQL de Integrify.
 - [ ] BQI-12 — Alta de `bq-integraciones` en `AUTHORIZED_SERVICES` de Token-SAP-BQ de **producción**
   (hoy usa credenciales de test de `gestor-bq`, ver `memory/project_credenciales_test_vs_prod.md`).
+  **Nota (2026-08-28):** verificado en vivo que `token-sap-bq-production.up.railway.app` con
+  `gestor-bq`/`gestor-bioquimica-2026` YA responde sesión válida (`sap_db=CLPRDBIOQUIMICA`) — el
+  servicio de producción existe y el gestor tiene acceso; falta decidir el momento de usarlo desde acá.
 - [ ] Compañía SAP de producción real en `SAP_URL`/sesión (hoy `CLTSTBIOQUIMICA`, confirmado por
   `sap_db` de la sesión de Token-SAP-BQ — ver hallazgo 2026-08-18).
 - [ ] Destinatarios reales de Brevo (`BREVO_INVOICE_BCC`/`ALERT_EMAILS`, sacados de Strapi de
@@ -420,8 +489,152 @@ diferidos a propósito hasta que se decida ir a producción. Consolidado acá pa
   con `[PRUEBA]`, ningún correo llega a un cliente real (freno ya construido y probado, BQI-52).
 - [ ] `pipeline_state` arranca apagado por defecto — decidir explícitamente cuándo prenderlo
   (`POST /pipeline/enable`) recién con todo lo anterior confirmado.
+- [ ] **Couriers reales en `delivery_methods`** (2026-09-02) — cargar `SGmoveup`/`SGchistn`/
+  `SGchiexp` (MoveUp/Chibra Terrestre/Chibra Express) + Starken cuando se defina su SKU (ver R8 y
+  registro E3). Sin esto, cualquier pedido con despacho real factura con el SKU genérico `SG000096`
+  en vez del courier correcto.
+
+## 10.2 Ambiente de desarrollo desplegado (2026-08-28/09-01)
+
+Repo propio + CI/CD + ambiente `desarrollo` corriendo de punta a punta en el servidor on-prem
+(`152.230.53.151`), separado por completo de lo que eventualmente sea producción.
+
+- **Repo:** `github.com/FelipeMv2301/BQ-Integraciones`, privado. Dos ramas: `desarrollo`/`produccion`
+  (sin tilde/mayúscula a propósito, evita problemas de nombres de rama entre Windows/Linux en
+  scripts/CI). Commit inicial con `.gitignore` (excluye `.env`/`.env.*`, deja pasar `.env.example`) —
+  verificado con `git status` antes del primer commit que ningún secreto se coló.
+- **`docs/`** — reorganizados ahí todos los ejemplos de payload, `campos-payload-sap.md`,
+  `respuesta-payload-bio-commerce.md`, `catalogo-municipalities.csv` (346 filas) y el payload real de
+  BioCommerce (`ejemplo-payload-web-nuevo-bio_commerce.json`, pedido `5914`).
+- **`bq_integraciones_test`** — base Postgres nueva y limpia en el mismo servidor (`bq_integraciones`
+  original queda intacta, con la basura del incidente de polling, sin tocar). `alembic upgrade head`
+  desde cero + los 4 catálogos estáticos migrados vía `pg_dump`/`COPY` (346/9/3/9 filas, conteos
+  verificados). Requirió agregar reglas nuevas a `pg_hba.conf` (el servidor filtra por nombre de base,
+  no hay wildcard) + `pg_reload_conf()`.
+- **`.env.desarrollo`** — perfil separado del `.env` real: `WOO_URL/KEY/SECRET` apuntan al sitio de
+  prueba (`bioquimica.devwebs.cl`, ya no a `WOO_NUEVO_*`), `DATABASE_URL` a `bq_integraciones_test`,
+  `REDIS_URL` con índice `/1` (no `/0`) para que `pipeline_state`/locks/caché SAP no choquen si algún
+  día desarrollo y producción corren contra el mismo Redis, `HEALTHCHECKS_CHECKS` vacío a propósito
+  (los UUIDs de hoy son los reales de producción — un worker de prueba no debe ensuciar esa señal).
+- **CI/CD:** runner self-hosted (`actions-runner-bq-integraciones`, systemd, mismo patrón que
+  Gestor-BQ/MELI-BQ) + `.github/workflows/deploy-desarrollo.yml` — push a `desarrollo` dispara
+  `alembic upgrade head` + `docker compose up -d --build` en el servidor. `docker-compose.yml` ya traía
+  el puerto fijo (`8020:8000`) pensado para este server desde BQI-06, no hizo falta tocarlo. El `.env`
+  real vive sin trackear en el workdir del runner (`checkout` con `clean:false` para no borrarlo entre
+  corridas). Probado de punta a punta: 2 corridas fallaron limpio sin `.env` (esperado), 3ra corrida
+  con `.env` ya puesto: build completo (~10 min primera vez, sin caché) + 3 contenedores arriba +
+  `/health` → `200`.
+- **URL pública:** `https://bq-integraciones-dev.bioquimica.cl` — agregado al túnel Cloudflare
+  compartido (`mirastock/cloudflared/config.yml` + `mirastock/Caddyfile`, mismo tunnel ID que
+  mirastock/gestor/meli-dev), reverse proxy a `host.docker.internal:8020`. Requirió reiniciar
+  `caddy`/`cloudflared` de mirastock (corte de segundos para esos otros sitios). CNAME en Cloudflare
+  (`bq-integraciones-dev` → `<tunnel-id>.cfargotunnel.com`, proxied) creado por Felipe. Verificado
+  funcionando end-to-end.
+- **`pipeline_state` sigue apagado** — nada se procesa automático en este ambiente hasta prenderlo
+  explícito, ni siquiera estando desplegado y con URL pública.
 
 ## 11. Resumen del estado del proyecto
 
 *(se completa al cierre de cada sesión de implementación — qué se hizo, qué quedó pendiente, qué se
 descubrió que cambia el plan)*
+
+### 2026-09-02 — Prueba end-to-end con pedido de prueba real
+
+Se creó un pedido de prueba real en `bioquimica.devwebs.cl` (ID `9234` — RUT propio de Felipe
+`21.269.680-3`, Factura, 2 productos reales con stock, `paid_at` seteado) para verificar la
+implementación de punta a punta. Hallazgos de la sesión:
+
+- **Bug real (nuestro, bloqueante)** — `_bc_extraer_paid_at()` (`app/pipelines/woo_orders.py`) no
+  manejaba datetimes con offset (`payment.paid_at` de BioCommerce viene con `+00:00`; la columna
+  `paid_at` es `TIMESTAMP WITHOUT TIME ZONE`) — rompía el insert en Postgres. Primer pedido de prueba
+  que trae `paid_at` real (los anteriores estaban sin pagar), nunca se había ejercitado este camino.
+  **Fixeado** (normaliza a UTC naive), `ruff` limpio, 23/23 tests — **pendiente de commit/push** para
+  llegar al ambiente `desarrollo` desplegado.
+- **Falso bug** (era la data de prueba armada por Claude, no el pipeline ni el plugin) — el pedido de
+  prueba se armó primero con meta_data del esquema viejo (`_billing_*`, Integrify) en vez del esquema
+  real que usa el checkout hoy (`_bio_*`) — confirmado comparando contra un pedido real de checkout
+  (`9232`). `docs/respuesta-payload-bio-commerce.md` (28-ago) quedó **obsoleto**: reporta como bug del
+  plugin algo que ya no aplica con el esquema `_bio_*` actual. Corregido el meta_data de `9234`, el
+  payload normalizado ahora trae `sii_code`/`business_activity_code`/comuna completos.
+- **Gap real, sin cerrar** — SKU de envío por courier (R8, registro E3): hoy cualquier despacho
+  factura con el SKU genérico `SG000096`. 3 SKUs ya confirmados por Felipe, Starken pendiente — falta
+  cargarlos en `delivery_methods`.
+
+**Pendiente para la próxima sesión**: commit+push del fix de `paid_at`, cargar los couriers en
+`delivery_methods`, y volver a disparar `sync-order-biocommerce/9234` contra el servidor real para
+completar la prueba de punta a punta (todavía no se llegó a `create_sap_invoice`).
+
+### 2026-09-03 — Auditoría de código, ciclo completo en SAP TEST, y BioCommerce PRO como único origen
+
+**Auditoría de consistencia/eficiencia (2026-09-02, cerrada hoy)** — a pedido de Felipe ("no se
+puede tener código así a largo plazo"), 2 frentes en paralelo (patrón de normalización disperso +
+code review general) encontraron 16 hallazgos. 7 aplicados uno por uno, cada uno con test de
+regresión nuevo, 228/228 tests, 3 commits (`50eb69c`/`75faad8`/`f85ed04`):
+- Helper `marcar_fallido()` (`app/pipelines/errors.py`, nuevo) centraliza FAILED+attempts+=1+commit,
+  copy-pasteado ~13 veces antes — cerraba el hueco real de llamadas a SAP/Stock-Service sin
+  try/except, que dejaban `attempts` sin subir y la entidad reintentándose en silencio para siempre.
+- `poll_woo_orders`/`poll_biocommerce_orders` aislados por pedido (I2) — antes uno malformado
+  abortaba el lote completo.
+- `SAPBilling` huérfanos por discrepancia de totales (validar antes de `session.add`, no después).
+- `/retry/woo_orders/{id}` reintenta el ciclo completo (`resolve_customer` + `prepare_billing`), no
+  solo lo segundo.
+- Copy-paste `SAP_BILLING_MAX_ATTEMPTS`→`RESOLVE_CUSTOMER_MAX_ATTEMPTS` en `_escalar_resolve_customer`.
+- Escalamiento inmediato ante `PermanentError` (antes esperaba a agotar `max_attempts` en vano).
+
+3 hallazgos descartados por ser réplica fiel de Integrify-Consola/Stock-Service (no bugs nuestros,
+confirmado grepeando el legado antes de tocar nada): `contact_code=contact_name` en
+`BillingPayload.build` (`sap/billing.py`), lock sin token de propiedad (`tasks/locks.py`, idéntico en
+Stock-Service), caché de sesión SAP que confunde TTL vencido con Redis caído (`sap/session.py`,
+idéntico en Stock-Service). El redondeo mixto ya estaba decidido y cerrado desde el 14-ago
+(`memory/project_gaps_billing_boleta_decimales_resume.md`).
+
+**MELI-BQ retirado** — era una prueba de una integración con Mercado Libre que no funcionó. Carpeta
+local borrada, servicio systemd roto (`actions.runner.FelipeMv2301-MELI-BQ...`, apuntaba a un
+directorio de runner que ya no existía) parado/deshabilitado/borrado del servidor. Repo de GitHub
+queda intacto.
+
+**Primer ciclo completo, punta a punta, en SAP TEST real** — pedido de prueba `9237`
+(`bioquimica.devwebs.cl`, RUT propio de Felipe, datos limpios desde el inicio con el esquema
+`_bio_*` correcto) llegó `COMPLETED` (`DocEntry 104019`, `DocNum 30402`). En el camino, 2 hallazgos
+de **datos maestros de SAP TEST** (no bugs de código, confirmados consultando `Items()` directo en
+Service Layer): el SKU `RP0436B3` tenía `SalesItem=tNO` (activo pero no marcado para venta) y el SKU
+`RP0107B1` tenía stock en bodega `11` pero el pipeline factura contra la `01` que resuelve
+Stock-Service — Felipe corrigió ambos en SAP directamente.
+
+**Hallazgo urgente al prender `pipeline_state`** — Felipe pidió prender el interruptor para probar
+reintentos automáticos. `task_poll_woo_orders` (Beat) todavía llamaba al adaptador **nativo** de
+WooCommerce (`poll_woo_orders` viejo), no al de BioCommerce PRO — la API nativa de
+`bioquimica.devwebs.cl` no trae `tax_id`/`document_type` dentro de `billing` (confirmado contra un
+pedido real), así que cualquier pedido real nuevo se habría ingerido sin RUT ni comuna resueltos y
+fallado de entrada en `resolve_customer`. Apagado a los pocos minutos, sin daño (`/failures` vacío,
+ningún ciclo alcanzó a correr). Causa: `poll_biocommerce_orders()` se había dejado **a propósito**
+sin conectar a Beat (1-sep) porque en ese momento bioquimica.cl era "el sitio real" y devwebs.cl "el
+nuevo, en pruebas" — la situación se invirtió (devwebs.cl es la web real ahora) y el código nunca se
+actualizó.
+
+**Consolidación a BioCommerce PRO como único origen** (a pedido explícito de Felipe: "no mapeemos
+por diferentes variables de entorno... quiero que todo el código esté adaptado a la estructura de
+BioCommerce PRO") — retirado por completo el path nativo de WooCommerce:
+- `app/services/woocommerce/` (client.py + orders.py) **borrado**.
+- `app/pipelines/woo_orders.py`: quedó solo el adaptador BioCommerce, renombrado a los nombres
+  canónicos (`_pedido_a_woo_order`, `poll_woo_orders`, sin prefijo `_bc_`/sufijo `_biocommerce` — ya
+  no hay ambigüedad de cuál es cuál).
+- `orchestrator.py`: `sync_order_to_sap_biocommerce`→`sync_order_to_sap`, ídem
+  `_obtener_o_crear_woo_order`. Endpoint único `POST /pipeline/sync-order/{code}` (se retiró
+  `/sync-order-biocommerce/{code}`).
+- `task_poll_woo_orders` ahora sí llama al poller de BioCommerce — cierra el hallazgo urgente de
+  arriba.
+- `config.py`: una sola `WOO_URL`/`WOO_KEY`/`WOO_SECRET` (se retiró `WOO_NUEVO_*`) — el sitio activo
+  se cambia ahí, no mapeando variables por sitio. Asume BioCommerce PRO instalado en lo que sea que
+  apunte.
+- `.env`/`.env.desarrollo`/`.env` del servidor actualizados. **Ojo**: el `.env` raíz (no
+  `.desarrollo`) seguía apuntando a `bioquimica.cl` (sin BioCommerce PRO) — queda con una nota de
+  advertencia, no se cambió el valor sin confirmar con Felipe. El `.env.desarrollo` local y el del
+  servidor tenían además **2 keys distintas** de Woo para devwebs.cl bajo `WOO_KEY` vs
+  `WOO_NUEVO_KEY` — la vieja (`ck_df04...`/servidor `ck_8185...`) da 401 al escribir; se consolidó a
+  la key con permiso Lectura/Escritura confirmada en vivo toda la sesión (`ck_2b4881e2...`).
+- 216/216 tests (bajó de 228 al sacar los del path nativo, no son bugs), `ruff check .` limpio.
+
+**Pendiente**: prender `pipeline_state` de nuevo ahora que Beat usa el poller correcto (quedó
+apagado tras el hallazgo urgente) — decidir el momento con Felipe. Courier SKU (R8) sigue sin
+cerrar.
