@@ -24,7 +24,14 @@ jobs:
       # Corre en el workspace del checkout (SQLite en memoria, sin red ni
       # Postgres real -- no depende de nada externo).
       - name: Tests (gate)
+        # cp .env.example .env: Settings (config.py) exige varios campos sin
+        # default -- .env real nunca viaja al checkout (gitignored), así que
+        # sin esto revienta al importar antes de correr un solo test. El
+        # .example ya está versionado, sin secretos, valores vacíos alcanzan
+        # (son todos str). No contamina el deploy real: el rsync de abajo
+        # excluye .env explícitamente.
         run: |
+          cp .env.example .env
           uv sync --extra dev
           uv run ruff check .
           uv run pytest -q
