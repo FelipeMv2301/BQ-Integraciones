@@ -40,17 +40,6 @@ def _sin_escalamiento_por_defecto(monkeypatch):
     monkeypatch.setattr(orchestrator.failure_tracking, "escalar_si_agotado", _noop)
 
 
-def _pedido_crudo(id_=1001, number=900, tax_id="12345678-5") -> dict:
-    return {
-        "id": id_, "number": number, "status": "processing",
-        "date_paid_gmt": "2026-08-13T10:00:00", "total": "15000.00",
-        "discount_total": "0", "shipping_total": "0",
-        "pay_authorization_code": "", "transaction_id": "",
-        "shipping_lines": [], "billing": {"tax_id": tax_id, "document_type": "39"},
-        "shipping": {}, "line_items": [],
-    }
-
-
 async def _armar_woo_order(session, code=1001, tax_id="12345678-5", status="PENDING") -> WooOrder:
     orden = WooOrder(
         code=code, reference=900, total=15000, customer_tax_id=tax_id,
@@ -99,48 +88,9 @@ def _mock_ok(monkeypatch):
     monkeypatch.setattr(orchestrator.billing, "create_sap_invoice", _create_sap_invoice)
 
 
-# ── sync_order_to_sap (manual, un pedido puntual) ───────────────────────
+# ── sync_order_to_sap (manual, un pedido puntual, vía BioCommerce PRO) ──
 
-async def test_pedido_ya_existe_no_llama_a_woocommerce(session, monkeypatch):
-    await _armar_woo_order(session)
-    _mock_ok(monkeypatch)
-    monkeypatch.setattr(
-        orchestrator.woo_orders_api, "obtener_pedido",
-        lambda code: (_ for _ in ()).throw(AssertionError("no debería llamar a WooCommerce")),
-    )
-
-    resultado = await orchestrator.sync_order_to_sap(session, 1001)
-
-    assert resultado["error"] is None
-    assert resultado["cliente"] == "CN12345678-5"
-
-
-async def test_pedido_no_existe_lo_trae_de_woocommerce(session, monkeypatch):
-    monkeypatch.setattr(orchestrator.woo_orders_api, "obtener_pedido", lambda code: _pedido_crudo(id_=code))
-    _mock_ok(monkeypatch)
-
-    resultado = await orchestrator.sync_order_to_sap(session, 2002)
-
-    assert resultado["error"] is None
-    assert resultado["cliente"] == "CN12345678-5"
-
-
-async def test_pedido_no_existe_en_woocommerce_devuelve_error_sin_seguir(session, monkeypatch):
-    monkeypatch.setattr(orchestrator.woo_orders_api, "obtener_pedido", lambda code: None)
-    llamado = []
-    async def _resolve_customer(s, tax_id, datos):
-        llamado.append(True)
-    monkeypatch.setattr(orchestrator.customers, "resolve_customer", _resolve_customer)
-
-    resultado = await orchestrator.sync_order_to_sap(session, 3003)
-
-    assert "no existe en WooCommerce" in resultado["error"]
-    assert llamado == []
-
-
-# ── sync_order_to_sap_biocommerce (manual, sitio nuevo) ─────────────────
-
-def _payload_biocommerce_crudo(id_=9232, number="9232", tax_id="19.720.592-K") -> dict:
+def _payload_crudo(id_=9232, number="9232", tax_id="19.720.592-K") -> dict:
     return {
         "order": {"id": id_, "number": number, "status": "on-hold"},
         "tax_document": {"sii_code": 33, "tax_id": tax_id, "business_name": "razon social prueba"},
@@ -154,7 +104,7 @@ def _payload_biocommerce_crudo(id_=9232, number="9232", tax_id="19.720.592-K") -
     }
 
 
-async def test_biocommerce_pedido_ya_existe_no_llama_a_biocommerce(session, monkeypatch):
+async def test_pedido_ya_existe_no_llama_a_biocommerce(session, monkeypatch):
     await _armar_woo_order(session, code=9232)
     _mock_ok(monkeypatch)
     monkeypatch.setattr(
@@ -162,33 +112,33 @@ async def test_biocommerce_pedido_ya_existe_no_llama_a_biocommerce(session, monk
         lambda code: (_ for _ in ()).throw(AssertionError("no debería llamar a BioCommerce")),
     )
 
-    resultado = await orchestrator.sync_order_to_sap_biocommerce(session, 9232)
+    resultado = await orchestrator.sync_order_to_sap(session, 9232)
 
     assert resultado["error"] is None
     assert resultado["cliente"] == "CN12345678-5"
 
 
-async def test_biocommerce_pedido_no_existe_lo_trae_de_biocommerce(session, monkeypatch):
+async def test_pedido_no_existe_lo_trae_de_biocommerce(session, monkeypatch):
     monkeypatch.setattr(
         orchestrator.biocommerce_api, "obtener_pedido",
-        lambda code: _payload_biocommerce_crudo(id_=code),
+        lambda code: _payload_crudo(id_=code),
     )
     _mock_ok(monkeypatch)
 
-    resultado = await orchestrator.sync_order_to_sap_biocommerce(session, 9232)
+    resultado = await orchestrator.sync_order_to_sap(session, 9232)
 
     assert resultado["error"] is None
     assert resultado["cliente"] == "CN19720592-K"  # normalizado en la ingesta (sin puntos)
 
 
-async def test_biocommerce_pedido_no_existe_devuelve_error_sin_seguir(session, monkeypatch):
+async def test_pedido_no_existe_en_biocommerce_devuelve_error_sin_seguir(session, monkeypatch):
     monkeypatch.setattr(orchestrator.biocommerce_api, "obtener_pedido", lambda code: None)
     llamado = []
     async def _resolve_customer(s, tax_id, datos):
         llamado.append(True)
     monkeypatch.setattr(orchestrator.customers, "resolve_customer", _resolve_customer)
 
-    resultado = await orchestrator.sync_order_to_sap_biocommerce(session, 9999)
+    resultado = await orchestrator.sync_order_to_sap(session, 9999)
 
     assert "no existe en BioCommerce" in resultado["error"]
     assert llamado == []

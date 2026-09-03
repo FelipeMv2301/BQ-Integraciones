@@ -114,14 +114,19 @@ por qué — nunca un 500 opaco. Si agota `*_MAX_ATTEMPTS` en este mismo intento
 
 ## `POST /pipeline/sync-order/{code}`
 
-Sincroniza **un pedido puntual del sitio actual** (bioquimica.cl) hasta SAP, de punta a punta,
-para pruebas dirigidas — no reemplaza el polling automático de Beat.
+Sincroniza **un pedido puntual** hasta SAP, de punta a punta, para pruebas dirigidas — no
+reemplaza el polling automático de Beat. Pedido vía **BioCommerce PRO**
+(`GET /wp-json/bio-commerce/v1/orders/{code}/payload`, único origen del proyecto desde
+2026-09-03 — se retiró el path nativo de WooCommerce, que leía `meta_data` a mano y rompía cada
+vez que el checkout cambiaba de mecanismo).
 
-**`code`** — el **ID interno** de WooCommerce del pedido (`id` en la API de Woo, **no** el
-número de pedido visible al cliente, ej. `#24683` es `number`, no `id`).
+**`code`** — el **ID interno** del pedido (`order.id` en el payload de BioCommerce, **no** el
+número de pedido visible al cliente).
 
 **Qué hace, en orden:**
-1. Si el pedido no está en `woo_orders` todavía, lo trae de WooCommerce por ID puntual.
+1. Si el pedido no está en `woo_orders` todavía, lo trae de BioCommerce por ID puntual — ya
+   viene con RUT, tipo de documento, giro y código de comuna resueltos, sin escanear `meta_data`
+   a mano.
 2. `resolve_customer()` — crea/actualiza el cliente en SAP.
 3. `prepare_billing()` — trocea en uno o más `SAPBilling` (lotes de 21 ítems).
 4. `create_sap_invoice()` por cada chunk — con auto-carga de tasa de cambio si hace falta.
@@ -158,21 +163,8 @@ número de pedido visible al cliente, ej. `#24683` es `number`, no `id`).
 Nunca devuelve un 500 sin manejar — cualquier falla queda descrita en `error` o dentro de la
 `factura` puntual que falló.
 
----
-
-## `POST /pipeline/sync-order-biocommerce/{code}`
-
-Igual que el anterior, pero para el **sitio nuevo** (bioquimica.devwebs.cl), leyendo el pedido
-vía **BioCommerce PRO** (`GET /wp-json/bio-commerce/v1/orders/{code}/payload`) en vez de la API
-nativa de WooCommerce. Mismo `code` = ID interno del pedido (`order.id` del payload).
-
-Trae ya resueltos RUT, tipo de documento, giro y código de comuna — no hace falta escanear
-`meta_data` a mano como con el sitio actual. Mismos 4 pasos y misma forma de respuesta que
-`/pipeline/sync-order/{code}`.
-
-**Probado en vivo** contra SAP TEST con el pedido real `9232`: resuelve cliente bien
-(RUT + comuna), se frena en `prepare_billing` si el pedido no está pagado (`"sin paid_at"`) —
-correcto, no factura pedidos sin pagar de verdad.
+**Probado en vivo** contra SAP TEST: pedido `9237` (bioquimica.devwebs.cl) llegó `COMPLETED`
+(`DocEntry 104019`, `DocNum 30402`) de punta a punta.
 
 ---
 

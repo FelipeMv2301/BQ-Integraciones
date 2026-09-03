@@ -563,3 +563,78 @@ implementación de punta a punta. Hallazgos de la sesión:
 **Pendiente para la próxima sesión**: commit+push del fix de `paid_at`, cargar los couriers en
 `delivery_methods`, y volver a disparar `sync-order-biocommerce/9234` contra el servidor real para
 completar la prueba de punta a punta (todavía no se llegó a `create_sap_invoice`).
+
+### 2026-09-03 — Auditoría de código, ciclo completo en SAP TEST, y BioCommerce PRO como único origen
+
+**Auditoría de consistencia/eficiencia (2026-09-02, cerrada hoy)** — a pedido de Felipe ("no se
+puede tener código así a largo plazo"), 2 frentes en paralelo (patrón de normalización disperso +
+code review general) encontraron 16 hallazgos. 7 aplicados uno por uno, cada uno con test de
+regresión nuevo, 228/228 tests, 3 commits (`50eb69c`/`75faad8`/`f85ed04`):
+- Helper `marcar_fallido()` (`app/pipelines/errors.py`, nuevo) centraliza FAILED+attempts+=1+commit,
+  copy-pasteado ~13 veces antes — cerraba el hueco real de llamadas a SAP/Stock-Service sin
+  try/except, que dejaban `attempts` sin subir y la entidad reintentándose en silencio para siempre.
+- `poll_woo_orders`/`poll_biocommerce_orders` aislados por pedido (I2) — antes uno malformado
+  abortaba el lote completo.
+- `SAPBilling` huérfanos por discrepancia de totales (validar antes de `session.add`, no después).
+- `/retry/woo_orders/{id}` reintenta el ciclo completo (`resolve_customer` + `prepare_billing`), no
+  solo lo segundo.
+- Copy-paste `SAP_BILLING_MAX_ATTEMPTS`→`RESOLVE_CUSTOMER_MAX_ATTEMPTS` en `_escalar_resolve_customer`.
+- Escalamiento inmediato ante `PermanentError` (antes esperaba a agotar `max_attempts` en vano).
+
+3 hallazgos descartados por ser réplica fiel de Integrify-Consola/Stock-Service (no bugs nuestros,
+confirmado grepeando el legado antes de tocar nada): `contact_code=contact_name` en
+`BillingPayload.build` (`sap/billing.py`), lock sin token de propiedad (`tasks/locks.py`, idéntico en
+Stock-Service), caché de sesión SAP que confunde TTL vencido con Redis caído (`sap/session.py`,
+idéntico en Stock-Service). El redondeo mixto ya estaba decidido y cerrado desde el 14-ago
+(`memory/project_gaps_billing_boleta_decimales_resume.md`).
+
+**MELI-BQ retirado** — era una prueba de una integración con Mercado Libre que no funcionó. Carpeta
+local borrada, servicio systemd roto (`actions.runner.FelipeMv2301-MELI-BQ...`, apuntaba a un
+directorio de runner que ya no existía) parado/deshabilitado/borrado del servidor. Repo de GitHub
+queda intacto.
+
+**Primer ciclo completo, punta a punta, en SAP TEST real** — pedido de prueba `9237`
+(`bioquimica.devwebs.cl`, RUT propio de Felipe, datos limpios desde el inicio con el esquema
+`_bio_*` correcto) llegó `COMPLETED` (`DocEntry 104019`, `DocNum 30402`). En el camino, 2 hallazgos
+de **datos maestros de SAP TEST** (no bugs de código, confirmados consultando `Items()` directo en
+Service Layer): el SKU `RP0436B3` tenía `SalesItem=tNO` (activo pero no marcado para venta) y el SKU
+`RP0107B1` tenía stock en bodega `11` pero el pipeline factura contra la `01` que resuelve
+Stock-Service — Felipe corrigió ambos en SAP directamente.
+
+**Hallazgo urgente al prender `pipeline_state`** — Felipe pidió prender el interruptor para probar
+reintentos automáticos. `task_poll_woo_orders` (Beat) todavía llamaba al adaptador **nativo** de
+WooCommerce (`poll_woo_orders` viejo), no al de BioCommerce PRO — la API nativa de
+`bioquimica.devwebs.cl` no trae `tax_id`/`document_type` dentro de `billing` (confirmado contra un
+pedido real), así que cualquier pedido real nuevo se habría ingerido sin RUT ni comuna resueltos y
+fallado de entrada en `resolve_customer`. Apagado a los pocos minutos, sin daño (`/failures` vacío,
+ningún ciclo alcanzó a correr). Causa: `poll_biocommerce_orders()` se había dejado **a propósito**
+sin conectar a Beat (1-sep) porque en ese momento bioquimica.cl era "el sitio real" y devwebs.cl "el
+nuevo, en pruebas" — la situación se invirtió (devwebs.cl es la web real ahora) y el código nunca se
+actualizó.
+
+**Consolidación a BioCommerce PRO como único origen** (a pedido explícito de Felipe: "no mapeemos
+por diferentes variables de entorno... quiero que todo el código esté adaptado a la estructura de
+BioCommerce PRO") — retirado por completo el path nativo de WooCommerce:
+- `app/services/woocommerce/` (client.py + orders.py) **borrado**.
+- `app/pipelines/woo_orders.py`: quedó solo el adaptador BioCommerce, renombrado a los nombres
+  canónicos (`_pedido_a_woo_order`, `poll_woo_orders`, sin prefijo `_bc_`/sufijo `_biocommerce` — ya
+  no hay ambigüedad de cuál es cuál).
+- `orchestrator.py`: `sync_order_to_sap_biocommerce`→`sync_order_to_sap`, ídem
+  `_obtener_o_crear_woo_order`. Endpoint único `POST /pipeline/sync-order/{code}` (se retiró
+  `/sync-order-biocommerce/{code}`).
+- `task_poll_woo_orders` ahora sí llama al poller de BioCommerce — cierra el hallazgo urgente de
+  arriba.
+- `config.py`: una sola `WOO_URL`/`WOO_KEY`/`WOO_SECRET` (se retiró `WOO_NUEVO_*`) — el sitio activo
+  se cambia ahí, no mapeando variables por sitio. Asume BioCommerce PRO instalado en lo que sea que
+  apunte.
+- `.env`/`.env.desarrollo`/`.env` del servidor actualizados. **Ojo**: el `.env` raíz (no
+  `.desarrollo`) seguía apuntando a `bioquimica.cl` (sin BioCommerce PRO) — queda con una nota de
+  advertencia, no se cambió el valor sin confirmar con Felipe. El `.env.desarrollo` local y el del
+  servidor tenían además **2 keys distintas** de Woo para devwebs.cl bajo `WOO_KEY` vs
+  `WOO_NUEVO_KEY` — la vieja (`ck_df04...`/servidor `ck_8185...`) da 401 al escribir; se consolidó a
+  la key con permiso Lectura/Escritura confirmada en vivo toda la sesión (`ck_2b4881e2...`).
+- 216/216 tests (bajó de 228 al sacar los del path nativo, no son bugs), `ruff check .` limpio.
+
+**Pendiente**: prender `pipeline_state` de nuevo ahora que Beat usa el poller correcto (quedó
+apagado tras el hallazgo urgente) — decidir el momento con Felipe. Courier SKU (R8) sigue sin
+cerrar.

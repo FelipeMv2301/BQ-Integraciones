@@ -3,7 +3,8 @@ Orquestador de pedidos hasta SAP y de facturas hasta el correo. Dos chains:
 
 - Chain A (pedido -> SAP): sync_order_to_sap(session, code) manual (endpoint
   /pipeline/sync-order), procesar_pedidos_pendientes(session) automático
-  (Beat, task_poll_woo_orders).
+  (Beat, task_poll_woo_orders). Pedidos vía BioCommerce PRO -- único origen
+  del proyecto (2026-09-02).
 - Chain B (folio -> PDF -> email): sync_invoice_to_email(session, doc_entry)
   manual (endpoint /pipeline/sync-invoice), procesar_facturas_pendientes(session)
   automático (Beat, task_poll_sap_invoices).
@@ -26,9 +27,8 @@ from app.models.sap_customer import SAPCustomer
 from app.models.sap_invoice import SAPInvoice
 from app.models.woo_order import WooOrder
 from app.pipelines import billing, customers, documents, failure_tracking, invoices, notifications
-from app.pipelines.woo_orders import _pedido_a_woo_order, _pedido_biocommerce_a_woo_order
+from app.pipelines.woo_orders import _pedido_a_woo_order
 from app.services.biocommerce import orders as biocommerce_api
-from app.services.woocommerce import orders as woo_orders_api
 
 logger = logging.getLogger(__name__)
 
@@ -61,29 +61,11 @@ async def _obtener_o_crear_woo_order(session: AsyncSession, code: int) -> WooOrd
     if woo_order:
         return woo_order
 
-    pedido = woo_orders_api.obtener_pedido(code)
-    if pedido is None:
-        raise ValueError(f"Pedido {code} no existe en WooCommerce")
-
-    woo_order = _pedido_a_woo_order(pedido)
-    session.add(woo_order)
-    await session.commit()
-    return woo_order
-
-
-async def _obtener_o_crear_woo_order_biocommerce(session: AsyncSession, code: int) -> WooOrder:
-    """Igual que _obtener_o_crear_woo_order, pero para el sitio nuevo vía BioCommerce PRO."""
-    woo_order = (
-        await session.execute(select(WooOrder).where(WooOrder.code == code))
-    ).scalar_one_or_none()
-    if woo_order:
-        return woo_order
-
     payload = biocommerce_api.obtener_pedido(code)
     if payload is None:
         raise ValueError(f"Pedido {code} no existe en BioCommerce")
 
-    woo_order = _pedido_biocommerce_a_woo_order(payload)
+    woo_order = _pedido_a_woo_order(payload)
     session.add(woo_order)
     await session.commit()
     return woo_order
@@ -171,18 +153,9 @@ async def _procesar_pedido(session: AsyncSession, woo_order: WooOrder) -> dict:
 
 
 async def sync_order_to_sap(session: AsyncSession, code: int) -> dict:
-    """Endpoint manual (/pipeline/sync-order/{code}) — UN pedido puntual, sitio actual."""
+    """Endpoint manual (/pipeline/sync-order/{code}) — UN pedido puntual."""
     try:
         woo_order = await _obtener_o_crear_woo_order(session, code)
-    except Exception as exc:
-        return {"code": code, "cliente": None, "facturas": [], "error": f"Ingesta del pedido: {exc}"}
-    return await _procesar_pedido(session, woo_order)
-
-
-async def sync_order_to_sap_biocommerce(session: AsyncSession, code: int) -> dict:
-    """Endpoint manual (/pipeline/sync-order-biocommerce/{code}) — UN pedido puntual, sitio nuevo."""
-    try:
-        woo_order = await _obtener_o_crear_woo_order_biocommerce(session, code)
     except Exception as exc:
         return {"code": code, "cliente": None, "facturas": [], "error": f"Ingesta del pedido: {exc}"}
     return await _procesar_pedido(session, woo_order)

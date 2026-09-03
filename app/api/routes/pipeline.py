@@ -1,7 +1,7 @@
 """
 POST /pipeline/sync-order/{code} — sincroniza manualmente UN pedido puntual
-hasta SAP, para pruebas dirigidas. /sync-order-biocommerce/{code} es el
-equivalente para el sitio nuevo (bioquimica.devwebs.cl vía BioCommerce PRO).
+hasta SAP, para pruebas dirigidas. Pedido vía BioCommerce PRO (único origen
+del proyecto, 2026-09-02).
 /sync-invoice/{doc_entry} hace lo mismo para la otra punta: folio -> PDF
 (Facele) -> correo (Brevo), para UNA factura puntual.
 
@@ -15,11 +15,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core import pipeline_state
 from app.core.database import get_session
-from app.pipelines.orchestrator import (
-    sync_invoice_to_email,
-    sync_order_to_sap,
-    sync_order_to_sap_biocommerce,
-)
+from app.pipelines.orchestrator import sync_invoice_to_email, sync_order_to_sap
 
 router = APIRouter()
 
@@ -27,11 +23,6 @@ router = APIRouter()
 @router.post("/pipeline/sync-order/{code}")
 async def sync_order(code: int, session: AsyncSession = Depends(get_session)) -> dict:
     return await sync_order_to_sap(session, code)
-
-
-@router.post("/pipeline/sync-order-biocommerce/{code}")
-async def sync_order_biocommerce(code: int, session: AsyncSession = Depends(get_session)) -> dict:
-    return await sync_order_to_sap_biocommerce(session, code)
 
 
 @router.post("/pipeline/sync-invoice/{doc_entry}")

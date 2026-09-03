@@ -1,13 +1,13 @@
 """
-Cliente HTTP para BioCommerce PRO (bioquimica.devwebs.cl) — endpoint propio
-normalizado del sitio nuevo, `/wp-json/bio-commerce/v1/`. Reemplaza al
-cliente transicional que leía la API nativa de WooCommerce +meta_data a mano
-(app/services/woocommerce_nuevo, retirado) — el 401 del permission_callback
-del plugin ya se resolvió del lado de Angelo, confirmado 2026-09-01.
+Cliente HTTP para BioCommerce PRO — endpoint propio normalizado del sitio
+activo, `/wp-json/bio-commerce/v1/`. Único origen de pedidos del proyecto
+(2026-09-02: se retiró el path nativo de WooCommerce que leía meta_data a
+mano, rompía cada vez que el checkout cambiaba de mecanismo).
 
-Mismas credenciales que el cliente nativo del sitio nuevo (WOO_NUEVO_*): es
-el mismo WooCommerce, BioCommerce PRO reutiliza su propia autenticación
-ck_/cs_, solo cambia el endpoint.
+Usa WOO_URL/WOO_KEY/WOO_SECRET — una sola URL para todo el proyecto, se
+cambia en el .env según el sitio activo (test/prod), no mapeando variables
+separadas por sitio. Asume que ese WooCommerce tiene BioCommerce PRO
+instalado (endpoint /wp-json/bio-commerce/v1/), no la API nativa.
 """
 
 import requests
@@ -19,7 +19,7 @@ from app.core.api_log import make_response_hook
 from app.core.config import settings
 
 _http = requests.Session()
-_http.auth = HTTPBasicAuth(settings.WOO_NUEVO_KEY, settings.WOO_NUEVO_SECRET)
+_http.auth = HTTPBasicAuth(settings.WOO_KEY, settings.WOO_SECRET)
 _http.hooks["response"].append(make_response_hook("BioCommerce"))
 
 _retry = Retry(
@@ -32,7 +32,7 @@ _http.mount("http://", HTTPAdapter(max_retries=_retry))
 
 
 def _url(endpoint: str) -> str:
-    base = settings.WOO_NUEVO_URL.rstrip("/")
+    base = settings.WOO_URL.rstrip("/")
     return f"{base}/wp-json/bio-commerce/v1/{endpoint.lstrip('/')}"
 
 
