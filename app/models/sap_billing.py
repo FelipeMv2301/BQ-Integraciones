@@ -26,6 +26,7 @@ class SAPBilling(SyncStatusMixin, table=True):
     internal_notes: str | None = Field(default=None, max_length=100)
     public_notes: str | None = Field(default=None, max_length=254)
     pay_auth_code: str | None = Field(default=None, max_length=100)
+    purchase_order_code: str | None = Field(default=None, max_length=100)
 
     items: list = Field(default_factory=list, sa_column=Column(JSON))
 

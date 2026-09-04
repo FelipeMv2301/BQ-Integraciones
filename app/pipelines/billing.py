@@ -175,6 +175,7 @@ async def prepare_billing(session: AsyncSession, woo_order: WooOrder) -> list[SA
                     internal_notes=notas,
                     public_notes=notas,
                     pay_auth_code=woo_order.pay_auth_code,
+                    purchase_order_code=woo_order.purchase_order_code,
                     items=lote,
                 )
                 session.add(facturacion)

@@ -10,6 +10,12 @@ from pydantic import BaseModel, Field, computed_field
 from app.models.sap_billing import SAPBilling
 from app.models.sap_customer import SAPCustomer
 from app.services.sap import client
+from app.utils.dates import hoy_chile
+
+# Código fijo que SAP espera en U_TpoDoc para "orden de compra de terceros"
+# (tax_document.orden_compra de BioCommerce, ver woo_orders.py) -- pedido
+# explícito de Felipe, 2026-09-04.
+_TPO_DOC_ORDEN_COMPRA = "801"
 
 _ENDPOINT = "Invoices"
 SAP_TAX_CODE = "IVA"
@@ -50,6 +56,12 @@ class BillingPayload(BaseModel):
     internal_notes: str = Field(alias="Comments")
     public_notes: str = Field(alias="U_NX_Observacion")
     pay_auth_code: str | None = Field(default=None, alias="U_BQ_CodVoucher")
+    # Orden de compra de terceros (tax_document.orden_compra de BioCommerce)
+    # -- los 3 solo se mandan juntos, cuando el pedido trae ese dato; si no,
+    # se omiten los 3 (exclude_none=True en el model_dump del caller).
+    purchase_order_ref: str | None = Field(default=None, alias="U_FolioRef")
+    purchase_order_doc_type: str | None = Field(default=None, alias="U_TpoDoc")
+    purchase_order_date: str | None = Field(default=None, alias="U_FchRef")
     excluded: str = Field(default="N", alias="U_IXP_EXCLUDED")
     transfer_flag: str = Field(default="N", alias="U_Traspaso_FE")
     transfer_code: str = Field(default="1", alias="U_IndTraslado")
@@ -72,6 +84,16 @@ class BillingPayload(BaseModel):
         criterio exacto que Integrify-Consola.
         """
         fecha = factura.doc_date.strftime("%Y-%m-%d")
+
+        # Orden de compra: los 3 campos solo se llenan si el pedido trajo
+        # tax_document.orden_compra -- U_FchRef es la fecha de HOY (Chile),
+        # no doc_date (que es la fecha de pago del pedido, puede ser otro día).
+        purchase_order_ref = purchase_order_doc_type = purchase_order_date = None
+        if factura.purchase_order_code:
+            purchase_order_ref = factura.purchase_order_code
+            purchase_order_doc_type = _TPO_DOC_ORDEN_COMPRA
+            purchase_order_date = hoy_chile().strftime("%Y-%m-%d")
+
         return cls(
             doc_type_code=factura.doc_type_code,
             customer_code=cliente.code,
@@ -85,6 +107,9 @@ class BillingPayload(BaseModel):
             order_num=order_num,
             internal_notes=factura.internal_notes,
             public_notes=factura.public_notes,
+            purchase_order_ref=purchase_order_ref,
+            purchase_order_doc_type=purchase_order_doc_type,
+            purchase_order_date=purchase_order_date,
             pay_auth_code=factura.pay_auth_code,
             items=[
                 BillingItemPayload(

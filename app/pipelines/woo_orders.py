@@ -84,6 +84,17 @@ def _extraer_tax_id(payload: dict) -> str | None:
     return _normalizar_tax_id_ingesta((payload.get("tax_document") or {}).get("tax_id"))
 
 
+def _extraer_orden_compra(payload: dict) -> str | None:
+    """
+    tax_document.orden_compra (nuevo, 2026-09-04) -- opcional, viene vacío/
+    ausente en la mayoría de los pedidos. Cuando viene con contenido, se
+    mapea a U_FolioRef/U_TpoDoc/U_FchRef en la factura SAP (ver
+    services/sap/billing.py::BillingPayload.build).
+    """
+    valor = (payload.get("tax_document") or {}).get("orden_compra")
+    return str(valor).strip() or None if valor else None
+
+
 def _billing_address(payload: dict) -> dict:
     """
     construir_datos_cliente() espera 'state' con el CÓDIGO de comuna (no el
@@ -147,6 +158,7 @@ def _pedido_a_woo_order(payload: dict) -> WooOrder:
         delivery_method_code=_extraer_delivery_method_code(payload),
         bill_doc_type_code=_extraer_doc_type_code(payload),
         customer_tax_id=_extraer_tax_id(payload),
+        purchase_order_code=_extraer_orden_compra(payload),
         billing_address=_billing_address(payload),
         shipping_address=_shipping_address(payload),
         items=_extraer_items(payload),

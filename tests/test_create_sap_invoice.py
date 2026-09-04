@@ -255,3 +255,49 @@ def test_billing_payload_build_respeta_r1_docduedate_igual_a_docdate():
     volcado = payload.model_dump(by_alias=True)
 
     assert volcado["DocDate"] == volcado["DocDueDate"] == "2026-08-13"
+
+
+def _factura_y_cliente(purchase_order_code=None):
+    factura = SAPBilling(
+        woo_order_id=1, chunk_index=0, doc_type_code="39", total=1190,
+        doc_date=date(2026, 8, 13), internal_notes="x", public_notes="x",
+        purchase_order_code=purchase_order_code,
+        items=[{"sku": "ML0001", "qty": 1, "price": 1000, "total": 1000, "warehouse_code": "01"}],
+    )
+    cliente = SAPCustomer(
+        tax_id="12345678-5", code="CN12345678-5", name="Cliente", phone="+56900000000",
+        email="c@example.com", contact_name="CONTACTO", ship_code="DESPACHO", bill_code="FISCAL",
+    )
+    return factura, cliente
+
+
+def test_billing_payload_con_orden_compra_llena_folio_ref_y_tpo_doc():
+    """
+    tax_document.orden_compra de BioCommerce (2026-09-04) -- cuando el
+    pedido trae ese dato, se manda U_FolioRef/U_TpoDoc=801/U_FchRef=hoy
+    (Chile), distinto de DocDate (que es la fecha de pago, no la de hoy).
+    """
+    from app.utils.dates import hoy_chile
+
+    factura, cliente = _factura_y_cliente(purchase_order_code="OC-2026-001")
+
+    payload = billing.sap_billing.BillingPayload.build(factura, cliente, order_num=100)
+    volcado = payload.model_dump(by_alias=True, exclude_none=True)
+
+    assert volcado["U_FolioRef"] == "OC-2026-001"
+    assert volcado["U_TpoDoc"] == "801"
+    assert volcado["U_FchRef"] == hoy_chile().strftime("%Y-%m-%d")
+    assert volcado["U_FchRef"] != volcado["DocDate"]  # hoy != fecha de pago (2026-08-13)
+
+
+def test_billing_payload_sin_orden_compra_no_manda_esos_campos():
+    """Si tax_document.orden_compra vino vacío/ausente, los 3 campos se
+    omiten del todo -- no se mandan como null/vacío a SAP."""
+    factura, cliente = _factura_y_cliente(purchase_order_code=None)
+
+    payload = billing.sap_billing.BillingPayload.build(factura, cliente, order_num=100)
+    volcado = payload.model_dump(by_alias=True, exclude_none=True)
+
+    assert "U_FolioRef" not in volcado
+    assert "U_TpoDoc" not in volcado
+    assert "U_FchRef" not in volcado

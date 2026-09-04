@@ -107,6 +107,23 @@ def test_normalizar_tax_id_ingesta_invalido_se_guarda_crudo():
     assert pipeline._normalizar_tax_id_ingesta(None) is None
 
 
+def test_extraer_orden_compra_presente():
+    """tax_document.orden_compra (2026-09-04) -- confirmado en vivo contra
+    un pedido real (9238) que BioCommerce lo expone ahí."""
+    payload = _payload()
+    payload["tax_document"]["orden_compra"] = "OC-2026-001"
+    assert pipeline._extraer_orden_compra(payload) == "OC-2026-001"
+
+
+def test_extraer_orden_compra_ausente_o_vacia_es_none():
+    assert pipeline._extraer_orden_compra(_payload()) is None
+    payload = _payload()
+    payload["tax_document"]["orden_compra"] = ""
+    assert pipeline._extraer_orden_compra(payload) is None
+    payload["tax_document"]["orden_compra"] = None
+    assert pipeline._extraer_orden_compra(payload) is None
+
+
 def test_billing_address_usa_comuna_code_no_state_legible():
     billing = pipeline._billing_address(_payload())
     assert billing["state"] == "CL_114"
