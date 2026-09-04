@@ -43,13 +43,24 @@ jobs:
           mkdir -p "$DEPLOY_DIR"
           rsync -a --delete --exclude='.env' --exclude='.git' "$GITHUB_WORKSPACE"/ "$DEPLOY_DIR"/
 
+      # Build ANTES de migraciones -- si migraciones corriera primero (como
+      # antes), "docker compose run" usa la imagen YA construida del deploy
+      # anterior, sin el código/migraciones nuevas del commit actual. Bug
+      # real encontrado 2026-09-04 en desarrollo: alembic corrió "exitoso"
+      # (exit 0) contra una imagen vieja que ya se creía al día, sin aplicar
+      # la migración nueva -- silencioso, sin error, hasta que la app rompió
+      # con "column ... does not exist".
+      - name: Build
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: docker compose build
+
       - name: Migraciones (alembic upgrade head)
         working-directory: ${{ env.DEPLOY_DIR }}
         run: docker compose run --rm api uv run alembic upgrade head
 
-      - name: Build + up
+      - name: Up
         working-directory: ${{ env.DEPLOY_DIR }}
-        run: docker compose up -d --build
+        run: docker compose up -d
 
       - name: Limpieza de imágenes viejas
         run: docker image prune -f
