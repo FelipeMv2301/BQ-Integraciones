@@ -12,7 +12,7 @@ from app.models.sap_customer import SAPCustomer
 from app.services.sap import client
 from app.utils.dates import hoy_chile
 
-# Código fijo que SAP espera en U_TpoDoc para "orden de compra de terceros"
+# Código fijo que SAP espera en U_TpoDocRef para "orden de compra de terceros"
 # (tax_document.orden_compra de BioCommerce, ver woo_orders.py) -- pedido
 # explícito de Felipe, 2026-09-04.
 _TPO_DOC_ORDEN_COMPRA = "801"
@@ -60,7 +60,7 @@ class BillingPayload(BaseModel):
     # -- los 3 solo se mandan juntos, cuando el pedido trae ese dato; si no,
     # se omiten los 3 (exclude_none=True en el model_dump del caller).
     purchase_order_ref: str | None = Field(default=None, alias="U_FolioRef")
-    purchase_order_doc_type: str | None = Field(default=None, alias="U_TpoDoc")
+    purchase_order_doc_type: str | None = Field(default=None, alias="U_TpoDocRef")
     purchase_order_date: str | None = Field(default=None, alias="U_FchRef")
     excluded: str = Field(default="N", alias="U_IXP_EXCLUDED")
     transfer_flag: str = Field(default="N", alias="U_Traspaso_FE")

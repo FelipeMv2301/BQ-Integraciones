@@ -27,7 +27,7 @@ class WooOrder(SyncStatusMixin, table=True):
     shipping: int = Field(default=0)
     pay_auth_code: str | None = Field(default=None, max_length=100)
     # tax_document.orden_compra de BioCommerce (2026-09-04) -- opcional, se
-    # mapea a U_FolioRef/U_TpoDoc/U_FchRef en SAP cuando viene con contenido.
+    # mapea a U_FolioRef/U_TpoDocRef/U_FchRef en SAP cuando viene con contenido.
     purchase_order_code: str | None = Field(default=None, max_length=100)
 
     delivery_method_code: str | None = Field(default=None, max_length=100)

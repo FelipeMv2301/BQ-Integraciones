@@ -274,7 +274,7 @@ def _factura_y_cliente(purchase_order_code=None):
 def test_billing_payload_con_orden_compra_llena_folio_ref_y_tpo_doc():
     """
     tax_document.orden_compra de BioCommerce (2026-09-04) -- cuando el
-    pedido trae ese dato, se manda U_FolioRef/U_TpoDoc=801/U_FchRef=hoy
+    pedido trae ese dato, se manda U_FolioRef/U_TpoDocRef=801/U_FchRef=hoy
     (Chile), distinto de DocDate (que es la fecha de pago, no la de hoy).
     """
     from app.utils.dates import hoy_chile
@@ -285,7 +285,7 @@ def test_billing_payload_con_orden_compra_llena_folio_ref_y_tpo_doc():
     volcado = payload.model_dump(by_alias=True, exclude_none=True)
 
     assert volcado["U_FolioRef"] == "OC-2026-001"
-    assert volcado["U_TpoDoc"] == "801"
+    assert volcado["U_TpoDocRef"] == "801"
     assert volcado["U_FchRef"] == hoy_chile().strftime("%Y-%m-%d")
     assert volcado["U_FchRef"] != volcado["DocDate"]  # hoy != fecha de pago (2026-08-13)
 
@@ -299,5 +299,5 @@ def test_billing_payload_sin_orden_compra_no_manda_esos_campos():
     volcado = payload.model_dump(by_alias=True, exclude_none=True)
 
     assert "U_FolioRef" not in volcado
-    assert "U_TpoDoc" not in volcado
+    assert "U_TpoDocRef" not in volcado
     assert "U_FchRef" not in volcado

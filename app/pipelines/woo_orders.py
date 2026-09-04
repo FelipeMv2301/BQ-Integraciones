@@ -88,7 +88,7 @@ def _extraer_orden_compra(payload: dict) -> str | None:
     """
     tax_document.orden_compra (nuevo, 2026-09-04) -- opcional, viene vacío/
     ausente en la mayoría de los pedidos. Cuando viene con contenido, se
-    mapea a U_FolioRef/U_TpoDoc/U_FchRef en la factura SAP (ver
+    mapea a U_FolioRef/U_TpoDocRef/U_FchRef en la factura SAP (ver
     services/sap/billing.py::BillingPayload.build).
     """
     valor = (payload.get("tax_document") or {}).get("orden_compra")

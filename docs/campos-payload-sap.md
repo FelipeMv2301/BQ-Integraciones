@@ -62,7 +62,7 @@ Fuente: `app/services/sap/customers.py::CustomerPayload` y
 | `U_WedDocNum` | número de pedido Woo — es la referencia que relaciona el chunk con el pedido en SAP | dinámico |
 | `Comments` / `U_NX_Observacion` | notas internas/públicas (`"Pedido web {reference}"`) | dinámico |
 | `U_BQ_CodVoucher` | código de autorización de pago (opcional, puede venir `null`) | dinámico |
-| `U_FolioRef`, `U_TpoDoc`, `U_FchRef` | orden de compra de terceros (`tax_document.orden_compra` de BioCommerce, 2026-09-04) — los 3 **solo se mandan juntos**, cuando ese campo viene con contenido; si no, se omiten los 3. `U_TpoDoc` fijo en `"801"`, `U_FchRef` es la fecha de **hoy** en Chile (no la fecha de pago del pedido) | opcional (dinámico si viene, ausente si no) |
+| `U_FolioRef`, `U_TpoDocRef`, `U_FchRef` | orden de compra de terceros (`tax_document.orden_compra` de BioCommerce, 2026-09-04) — los 3 **solo se mandan juntos**, cuando ese campo viene con contenido; si no, se omiten los 3. `U_TpoDocRef` fijo en `"801"`, `U_FchRef` es la fecha de **hoy** en Chile (no la fecha de pago del pedido) | opcional (dinámico si viene, ausente si no) |
 | `PaymentGroupCode` | `-1` (contado) | **fijo** |
 | `SalesPersonCode` | `"25"` | **fijo** |
 | `U_BQ_AREA` | `"TRA"` | **fijo** |
